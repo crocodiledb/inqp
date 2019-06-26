@@ -96,3 +96,6 @@ spark-warehouse/
 # For SBT
 .jvmopts
 
+# Added by Dixin
+*.tbl
+*.dat
