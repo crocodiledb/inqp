@@ -144,7 +144,7 @@ extends Iterator[InternalRow] with Logging {
           attr = aggFunc.asInstanceOf[Min].child.asInstanceOf[AttributeReference]
         }
         rowOffset = inputAttributes.indexWhere((inputAttr: Attribute) => {
-            inputAttr.asInstanceOf[AttributeReference].equals(attr)})
+            inputAttr.asInstanceOf[AttributeReference].semanticEquals(attr)})
         val nonIncMetaPerExpr = NonIncMetaPerExpr(
           aggExpr, bufOffset, rowOffset, aggFunc.dataType)
         nonIncMetaSeq = nonIncMetaSeq :+ nonIncMetaPerExpr
@@ -165,7 +165,9 @@ extends Iterator[InternalRow] with Logging {
 
     nonIncMeta.dataType match {
       case DoubleType =>
-        buffer.getDouble(bufOffset) == row.getDouble(rowOffset)
+        val bufVal = buffer.getDouble(bufOffset)
+        val rowVal = row.getDouble(rowOffset)
+        rowVal == bufVal
       case LongType =>
         buffer.getLong(bufOffset) == row.getLong(rowOffset)
       case IntegerType =>
@@ -276,7 +278,7 @@ extends Iterator[InternalRow] with Logging {
 
     val unsafeInput = input.asInstanceOf[UnsafeRow]
     val isInsert = unsafeInput.isInsert
-    unsafeInput.cleanInsert()
+    unsafeInput.cleanStates()
 
     // Load state into all hashmaps
     if (isNewGroup) {
@@ -468,6 +470,7 @@ extends Iterator[InternalRow] with Logging {
 
         // This is an insert
       } else if (oldGroupValue == null && newGroupValue != null) {
+        stateStoreforResult.put(groupKey, newGroupValue)
         ret = generateOutput(groupKey, newGroupValue)
         ret.setInsert(true)
         ret.setUpdate(false)

@@ -20,49 +20,11 @@ package totem.middleground.tpch
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.streaming.Trigger
 
 class QueryTPCH (bootstrap: String, query: String)
 {
-  def loadStreamTable(spark: SparkSession, tableName: String, alias: String): DataFrame = {
-    val (schema, _, topics, offsetPerTrigger) = TPCHSchema.GetMetaData(tableName).get
 
-    val ts_col = alias + "_ts"
-    return spark
-      .readStream
-      .format("kafka")
-      .option("kafka.bootstrap.servers", bootstrap)
-      .option("subscribe", topics)
-      .option("startingOffsets", "earliest")
-      .option("maxOffsetsPerTrigger", offsetPerTrigger)
-      .load().select(from_json(col("value").
-        cast("string"), schema).as(alias), col("timestamp").as(ts_col))
-      .selectExpr(alias + ".*", ts_col)
-      .withWatermark(ts_col, "10 seconds")
-
-  }
-
-  def loadStaticTable(spark: SparkSession, tableName: String, alias: String): DataFrame = {
-    val (schema, path, _, _) = TPCHSchema.GetMetaData(tableName).get
-
-    return spark
-      .read
-      .format("csv")
-      .option("sep", "|")
-      .schema(schema)
-      .load(path)
-  }
-
-  def writeToSink(query_result: DataFrame): Unit = {
-    val q = query_result
-      .writeStream
-      .outputMode("complete")
-      .format("console")
-      .trigger(Trigger.ProcessingTime("2 seconds"))
-      .start()
-
-    q.awaitTermination()
-  }
+  DataUtils.bootstrap = bootstrap
 
   def execQuery(query: String): Unit = {
     val spark = SparkSession.builder()
@@ -124,7 +86,7 @@ class QueryTPCH (bootstrap: String, query: String)
 
     val sum_disc_price = new Q1_sum_disc_price
 
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
 
     val result = l.filter($"l_shipdate" <= "1998-09-01")
       .select($"l_ts", $"l_returnflag", $"l_linestatus",
@@ -152,17 +114,17 @@ class QueryTPCH (bootstrap: String, query: String)
 
     // result.explain(true)
 
-    writeToSink(result)
+    DataUtils.writeToSink(result)
   }
 
   def execQ2_subquery(spark: SparkSession): DataFrame = {
     import spark.implicits._
 
-    val s = loadStreamTable(spark, "supplier", "s")
-    val ps = loadStreamTable(spark, "partsupp", "ps")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
 
-    val n = loadStaticTable(spark, "nation", "n")
-    val r = loadStaticTable(spark, "region", "r")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
+    val r = DataUtils.loadStaticTable(spark, "region", "r")
       .filter($"r_name" === "EUROPE")
 
     return r.join(n, $"r_regionkey" === $"n_regionkey")
@@ -177,12 +139,12 @@ class QueryTPCH (bootstrap: String, query: String)
   def execQ2(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val p = loadStreamTable(spark, "part", "p")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
       .filter(($"p_size" === 15) and ($"p_type" like("%BRASS")))
-    val s = loadStreamTable(spark, "supplier", "s")
-    val ps = loadStreamTable(spark, "partsupp", "ps")
-    val n = loadStaticTable(spark, "nation", "n")
-    val r = loadStaticTable(spark, "region", "r")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
+    val r = DataUtils.loadStaticTable(spark, "region", "r")
       .filter($"r_name" === "EUROPE")
 
     val subquery1_a = r.join(n, $"r_regionkey" === $"n_regionkey")
@@ -207,11 +169,11 @@ class QueryTPCH (bootstrap: String, query: String)
   def execQ3(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val c = loadStreamTable(spark, "customer", "c")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
       .filter($"c_mktsegment" === "BUILDING")
-    val o = loadStreamTable(spark, "orders", "o")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter($"o_orderdate" < "1995-03-15")
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter($"l_shipdate" > "1995-03-15")
 
     val result = c.join(o, $"c_custkey" === $"o_custkey")
@@ -224,17 +186,17 @@ class QueryTPCH (bootstrap: String, query: String)
 
     // result.explain(false)
 
-    writeToSink(result)
+    DataUtils.writeToSink(result)
   }
 
   def execQ4(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val o = loadStreamTable(spark, "orders", "o")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter($"o_orderdate" >= "1993-07-01"
       and $"o_orderdate" < "1993-10-01")
 
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter($"l_commitdate" < $"l_receiptdate")
       .select("l_orderkey")
 
@@ -252,14 +214,14 @@ class QueryTPCH (bootstrap: String, query: String)
   def execQ5(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val c = loadStreamTable(spark, "customer", "c")
-    val o = loadStreamTable(spark, "orders", "o")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter($"o_orderdate" >= "1994-01-01" and $"o_orderdate" < "1995-01-01")
-    val l = loadStreamTable(spark, "lineitem", "l")
-    val s = loadStreamTable(spark, "supplier", "s")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
 
-    val n = loadStaticTable(spark, "nation", "n")
-    val r = loadStaticTable(spark, "region", "r")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
+    val r = DataUtils.loadStaticTable(spark, "region", "r")
       .filter($"r_name" === "ASIA")
 
     val query_a = r.join(n, $"r_regionkey" === $"n_regionkey")
@@ -282,7 +244,7 @@ class QueryTPCH (bootstrap: String, query: String)
   def execQ6(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter(($"l_shipdate" between("1994-01-01", "1995-01-01"))
         and ($"l_discount" between(0.05, 0.07)) and ($"l_quantity" < 24))
 
@@ -297,14 +259,14 @@ class QueryTPCH (bootstrap: String, query: String)
   def execQ7(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter($"l_shipdate" between("1995-01-01", "1996-12-31"))
-    val s = loadStreamTable(spark, "supplier", "s")
-    val o = loadStreamTable(spark, "orders", "o")
-    val c = loadStreamTable(spark, "customer", "c")
-    val n1 = loadStaticTable(spark, "nation", "n1")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val n1 = DataUtils.loadStaticTable(spark, "nation", "n1")
       .select($"n_name".alias("supp_nation"), $"n_nationkey".as("n1_nationkey"))
-    val n2 = loadStaticTable(spark, "nation", "n2")
+    val n2 = DataUtils.loadStaticTable(spark, "nation", "n2")
       .select($"n_name".alias("cust_nation"), $"n_nationkey".as("n2_nationkey"))
 
     val result = l.join(s, $"l_suppkey" === $"s_suppkey")
@@ -323,7 +285,7 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy("supp_nation", "cust_nation", "l_year")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ8(spark: SparkSession): Unit = {
@@ -331,18 +293,18 @@ class QueryTPCH (bootstrap: String, query: String)
 
     val udaf_q8 = new UDAF_Q8
 
-    val p = loadStreamTable(spark, "part", "p")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
       .filter($"p_type" === "ECONOMY ANODIZED STEEL")
-    val s = loadStreamTable(spark, "supplier", "s")
-    val l = loadStreamTable(spark, "lineitem", "l")
-    val o = loadStreamTable(spark, "orders", "o")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter($"o_orderdate" between("1995-01-01", "1996-12-31"))
-    val c = loadStreamTable(spark, "customer", "c")
-    val n1 = loadStaticTable(spark, "nation", "n1")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val n1 = DataUtils.loadStaticTable(spark, "nation", "n1")
       .select($"n_regionkey".alias("n1_regionkey"), $"n_nationkey".as("n1_nationkey"))
-    val n2 = loadStaticTable(spark, "nation", "n2")
+    val n2 = DataUtils.loadStaticTable(spark, "nation", "n2")
       .select($"n_name".alias("n2_name"), $"n_nationkey".as("n2_nationkey"))
-    val r = loadStaticTable(spark, "region", "r")
+    val r = DataUtils.loadStaticTable(spark, "region", "r")
       .filter($"r_name" === "AMERICA")
 
     val result = l.join(p, $"l_partkey" === $"p_partkey")
@@ -359,19 +321,19 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy($"o_year")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ9(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val p = loadStreamTable(spark, "part", "p")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
       .filter($"p_name" like("%green%"))
-    val s = loadStreamTable(spark, "supplier", "s")
-    val l = loadStreamTable(spark, "lineitem", "l")
-    val ps = loadStreamTable(spark, "partsupp", "ps")
-    val o = loadStreamTable(spark, "orders", "o")
-    val n = loadStaticTable(spark, "nation", "n")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
 
     val result = l.join(p, $"l_partkey" === $"p_partkey")
       .join(ps, $"l_partkey" === $"ps_partkey" and $"l_suppkey" === $"ps_suppkey")
@@ -388,18 +350,18 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy($"nation", desc("o_year"))
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ10(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val c = loadStreamTable(spark, "customer", "c")
-    val o = loadStreamTable(spark, "orders", "o")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter($"o_orderdate" >= "1993-10-01" and $"o_orderdate" < "1994-01-01")
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter($"l_returnflag" === "R")
-    val n = loadStaticTable(spark, "nation", "n")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
 
     val result = l.join(o, $"l_orderkey" === $"o_orderkey")
       .join(c, $"o_custkey" === $"c_custkey")
@@ -410,15 +372,15 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy(desc("revenue"))
 
     result.explain(true)
-      // writeToSink(result)
+      // DataUtils.writeToSink(result)
   }
 
   def execQ11_subquery(spark: SparkSession): DataFrame = {
     import spark.implicits._
 
-    val ps = loadStreamTable(spark, "partsupp", "ps")
-    val s = loadStreamTable(spark, "supplier", "s")
-    val n = loadStaticTable(spark, "nation", "n")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
       .filter($"n_name" === "GERMANY")
 
     return s.join(n, $"s_nationkey" === $"n_nationkey")
@@ -430,9 +392,9 @@ class QueryTPCH (bootstrap: String, query: String)
   def execQ11(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val ps = loadStreamTable(spark, "partsupp", "ps")
-    val s = loadStreamTable(spark, "supplier", "s")
-    val n = loadStaticTable(spark, "nation", "n")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
       .filter($"n_name" === "GERMANY")
 
     val subquery = execQ11_subquery(spark);
@@ -447,7 +409,7 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy(desc("value"))
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ12(spark: SparkSession): Unit = {
@@ -456,8 +418,8 @@ class QueryTPCH (bootstrap: String, query: String)
     val udaf_q12_low = new UDAF_Q12_LOW
     val udaf_q12_high = new UDAF_Q12_HIGH
 
-    val o = loadStreamTable(spark, "orders", "o")
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter(($"l_shipmode" === "MAIL")
         and ($"l_commitdate" < $"l_receiptdate")
         and ($"l_shipdate" < $"l_commitdate")
@@ -473,13 +435,13 @@ class QueryTPCH (bootstrap: String, query: String)
 
     // result.explain(true)
 
-    writeToSink(result)
+    DataUtils.writeToSink(result)
   }
 
   def execQ13(spark: SparkSession): Unit = {
     import spark.implicits._
-    val c = loadStreamTable(spark, "customer", "c")
-    val o = loadStreamTable(spark, "orders", "o")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter(!($"o_comment" like("%special%requests%")))
 
     val result = c.join(o, $"c_custkey" === $"o_custkey", "left_outer")
@@ -492,16 +454,16 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy(desc("custdist"), desc("c_count"))
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ14(spark: SparkSession): Unit = {
     import spark.implicits._
 
     val udaf_q14 = new UDAF_Q14
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter($"l_shipdate" between("1995-09-01", "1995-10-01"))
-    val p = loadStreamTable(spark, "part", "p")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
 
     val result = l.join(p, $"l_partkey" === $"p_partkey")
       .agg(
@@ -509,13 +471,13 @@ class QueryTPCH (bootstrap: String, query: String)
         sum($"l_extendedprice" * ($"l_discount" - 1) * -1))
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ15_subquery(spark: SparkSession): DataFrame = {
     import  spark.implicits._
 
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter($"l_shipdate" between("1996-01-01", "1996-04-01"))
 
     return l.groupBy($"l_suppkey")
@@ -527,7 +489,7 @@ class QueryTPCH (bootstrap: String, query: String)
   def execQ15(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val s = loadStreamTable(spark, "supplier", "s")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
     val revenue = execQ15_subquery(spark)
 
     val result = s.join(revenue, $"s_suppkey" === $"supplier_no")
@@ -535,19 +497,19 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy("s_suppkey")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ16(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val ps = loadStreamTable(spark, "partsupp", "ps")
-    val p = loadStreamTable(spark, "part", "part")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
+    val p = DataUtils.loadStreamTable(spark, "part", "part")
       .filter(($"p_brand" =!= "Brand#45") and
         (!($"p_type" like("MEDIUM POLISHED")))
         and ($"p_size" isin(49, 14, 23, 45, 19, 3, 36, 9)))
 
-    val s = loadStreamTable(spark, "supplier", "s")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
       .filter($"s_comment" like("%Customer%Complaints%"))
       .select($"s_suppkey")
 
@@ -559,17 +521,17 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy(desc("supplier_cnt"), $"p_brand", $"p_type", $"p_size")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ17(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val l = loadStreamTable(spark, "lineitem", "l")
-    val p = loadStreamTable(spark, "part", "p")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
       .filter($"p_brand" === "Brand#23" and $"p_container" === "MED BOX")
 
-    val agg_l = loadStreamTable(spark, "lineitem", "l")
+    val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .groupBy($"l_partkey")
       .agg(
         (avg($"l_quantity") * 0.2).as("avg_quantity"))
@@ -582,16 +544,16 @@ class QueryTPCH (bootstrap: String, query: String)
         (sum($"l_extendedprice") / 7.0).as("avg_yearly"))
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ18(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val c = loadStreamTable(spark, "customer", "c")
-    val o = loadStreamTable(spark, "orders", "o")
-    val l = loadStreamTable(spark, "lineitem", "l")
-    val agg_l = loadStreamTable(spark, "lineitem", "l")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+    val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .groupBy("l_orderkey")
       .agg(sum("l_quantity").as("sum_quantity"))
       .filter($"sum_quantity" > 300)
@@ -605,16 +567,16 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy(desc("o_totalprice"), $"o_orderdate")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ19(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val l = loadStreamTable(spark, "lineitem", "l")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter(($"l_shipmode" isin("AIR", "AIR REG"))
         and ($"l_shipinstruct" === "DELIVER IN PERSON"))
-    val p = loadStreamTable(spark, "part", "p")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
 
     val result = l.join(p, $"l_partkey" === $"p_partkey"
       and ((($"p_brand" === "Brand#12") and
@@ -635,13 +597,13 @@ class QueryTPCH (bootstrap: String, query: String)
       .agg(sum($"l_extendedprice" * ($"l_discount" - 1) * -1)).as("revenue")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ20(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val agg_l = loadStreamTable(spark, "lineitem", "l")
+    val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .filter($"l_shipdate" between("1994-01-01", "1994-12-31"))
       .groupBy($"l_partkey", $"l_suppkey")
       .agg((sum($"l_quantity") * 0.5).as("agg_l_sum"))
@@ -649,46 +611,46 @@ class QueryTPCH (bootstrap: String, query: String)
       $"l_suppkey".as("agg_l_suppkey"),
       $"agg_l_sum")
 
-    val p = loadStreamTable(spark, "part", "p")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
       .filter($"p_name" like("forest%"))
 
-    val ps = loadStreamTable(spark, "partsupp", "ps")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
 
     val subquery = ps.join(p, $"ps_partkey" === $"p_partkey", "left_semi")
       .join(agg_l, $"ps_partkey" === $"agg_l_partkey"
         and $"ps_suppkey" === $"agg_l_suppkey" and $"ps_availqty" > $"agg_l_sum", "left_semi")
       .select("ps_suppkey")
 
-    val s = loadStreamTable(spark, "supplier", "s")
-    val n = loadStaticTable(spark, "nation", "n")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
       .filter($"n_name" === "CANADA")
 
     val result = s.join(n, $"s_nationkey" === $"n_nationkey")
       .join(subquery, $"s_suppkey" === $"ps_suppkey", "left_semi")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ21(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val s = loadStreamTable(spark, "supplier", "s")
-    val l1 = loadStreamTable(spark, "lineitem", "l1")
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val l1 = DataUtils.loadStreamTable(spark, "lineitem", "l1")
       .filter($"l_receiptdate" > $"l_commitdate")
-    val o = loadStreamTable(spark, "orders", "o")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter($"o_orderstatus" === "F")
-    val n = loadStaticTable(spark, "nation", "n")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
       .filter($"n_name" === "SAUDI ARABIA")
 
     val init_result = l1.join(o, $"l_orderkey" === $"o_orderkey")
       .join(s, $"l_suppkey" === $"s_suppkey")
       .join(n, $"s_nationkey" === $"n_nationkey")
 
-    val l2 = loadStreamTable(spark, "lineitem", "l2")
+    val l2 = DataUtils.loadStreamTable(spark, "lineitem", "l2")
       .select($"l_orderkey".as("l2_orderkey"),
       $"l_suppkey".as("l2_suppkey"))
-    val l3 = loadStreamTable(spark, "lineitem", "l3")
+    val l3 = DataUtils.loadStreamTable(spark, "lineitem", "l3")
       .filter($"l_receiptdate" > $"l_commitdate")
       .select($"l_orderkey".as("l3_orderkey"),
       $"l_suppkey".as("l3_suppkey"))
@@ -702,23 +664,23 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy(desc("numwait"), $"s_name")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 
   def execQ22(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val c = loadStreamTable(spark, "customer", "c")
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
       .filter(substring($"c_phone", 1, 2)
         isin("13", "31", "23", "29", "30", "18", "17"))
 
-    val subquery1 = loadStreamTable(spark, "customer", "c1")
+    val subquery1 = DataUtils.loadStreamTable(spark, "customer", "c1")
       .filter((substring($"c_phone", 1, 2)
         isin("13", "31", "23", "29", "30", "18", "17")) and
         ($"c_acctbal" > 0.00))
       .agg(avg($"c_acctbal").as("avg_acctbal"))
 
-    val o = loadStreamTable(spark, "orders", "o")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
 
     val result = c.join(subquery1, $"c_acctbal" > $"avg_acctbal", "cross")
       .join(o, $"c_custkey" === $"o_custkey", "left_anti")
@@ -728,7 +690,7 @@ class QueryTPCH (bootstrap: String, query: String)
       .orderBy($"cntrycode")
 
     result.explain(true)
-    // writeToSink(result)
+    // DataUtils.writeToSink(result)
   }
 }
 

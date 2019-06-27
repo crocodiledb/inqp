@@ -8,6 +8,7 @@ select
 	l_returnflag,
 	l_linestatus,
     max(l_quantity) as max_qty,
+    min(l_quantity) as min_qty,
     sum(l_extendedprice * (1 - l_discount))
 from
 	lineitem

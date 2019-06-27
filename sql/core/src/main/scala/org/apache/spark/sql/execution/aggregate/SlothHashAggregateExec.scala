@@ -106,14 +106,8 @@ case class SlothHashAggregateExec (
       val stateMemory = longMetric("stateMemory")
 
       val beforeAgg = System.nanoTime()
-      val hasInput = iter.hasNext
-      val resIter = if (!hasInput && groupingExpressions.nonEmpty) {
-        // This is a grouped aggregate and the input iterator is empty,
-        // so return an empty iterator.
-        Iterator.empty
-      } else {
-        val aggregationIterator =
-          new SlothAggregationIterator(
+      val resIter =
+        new SlothAggregationIterator(
             partIndex,
             groupingExpressions,
             aggregateExpressions,
@@ -136,14 +130,7 @@ case class SlothHashAggregateExec (
             watermarkPredicateForKeys,
             watermarkPredicateForData,
             deltaOutput)
-        if (!hasInput && groupingExpressions.isEmpty) {
-          numOutputRows += 1
-          Iterator.single[UnsafeRow](aggregationIterator.outputForEmptyGroupingKeyWithoutInput())
-        } else {
-          aggIter = aggregationIterator
-          aggregationIterator
-        }
-      }
+      aggIter = resIter
       allUpdatesTimeMs += (System.nanoTime() - beforeAgg) / 1000000
       CompletionIterator[InternalRow, Iterator[InternalRow]](resIter, onCompletion)
     }

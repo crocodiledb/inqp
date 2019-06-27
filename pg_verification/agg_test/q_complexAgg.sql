@@ -4,8 +4,8 @@ set work_mem to 1000000;
 set enable_nestloop to on; 
 set enable_mergejoin to on;
 
-select max(max_qty),
-       min(sum_disc_price)
+select max(max_qty) as final_max_qty,
+       max(sum_disc_price) as final_sum_disc_price
 from ( select
 	    l_returnflag,
 	    l_linestatus,
@@ -19,6 +19,8 @@ from ( select
 	    l_returnflag,
 	    l_linestatus
     ) as alldata
---group by
---    l_linestatus
+-- where
+--     l_returnflag != 'R'
+group by
+    l_linestatus
 

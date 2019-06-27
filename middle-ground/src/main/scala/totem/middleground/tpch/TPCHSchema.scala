@@ -98,23 +98,34 @@ object TPCHSchema {
     .add("r_name", "string")
     .add("r_comment", "string")
 
-  val parent_dir = "/home/totemtang/slothdb/spark/middle-ground/tpchdata"
-  val supplierPath = parent_dir + "/supplier"
-  val partPath = parent_dir + "/part"
-  val partsuppPath = parent_dir + "/partsupp"
-  val customerPath = parent_dir + "/customer"
-  val ordersPath = parent_dir + "/orders"
-  val lineitemPath = parent_dir + "/lineitem"
+  val slothdb_testroot = "/home/totemtang/slothdb/slothdb_testsuite"
+  val datadir = slothdb_testroot + "/datadir/tpchdata"
+  val supplierPath = datadir + "/supplier"
+  val partPath = datadir + "/part"
+  val partsuppPath = datadir + "/partsupp"
+  val customerPath = datadir + "/customer"
+  val ordersPath = datadir + "/orders"
+  val lineitemPath = datadir + "/lineitem"
 
   val nationPath = "hdfs://localhost:9000/tpch_data/nation.tbl"
   val regionPath = "hdfs://localhost:9000/tpch_data/region.tbl"
 
-  val lineitemOffset = 400000
-  val supplierOffset = 400000
-  val partOffset = 400000
-  val partsuppOffset = 400000
-  val customerOffset = 400000
-  val ordersOffset = 400000
+  val numMiniBatch = 3
+  val scaleFactor = 1
+
+  val lineitemSize = 600000 * scaleFactor
+  val ordersSize = 150000 * scaleFactor
+  val customerSize = 15000 * scaleFactor
+  val partSize = 20000 * scaleFactor
+  val partsuppSize = 80000 * scaleFactor
+  val supplierSize = 1000 * scaleFactor
+
+  val lineitemOffset = (lineitemSize + numMiniBatch - 1) / numMiniBatch
+  val supplierOffset = (supplierSize + numMiniBatch - 1) / numMiniBatch
+  val partOffset = (partSize + numMiniBatch - 1) / numMiniBatch
+  val partsuppOffset = (partsuppSize + numMiniBatch - 1) / numMiniBatch
+  val customerOffset = (customerSize + numMiniBatch - 1) / numMiniBatch
+  val ordersOffset = (ordersSize + numMiniBatch - 1) / numMiniBatch
 
   def GetMetaData(tableName: String) : Option[Tuple4[StructType, String, String, Long]] =
   {
