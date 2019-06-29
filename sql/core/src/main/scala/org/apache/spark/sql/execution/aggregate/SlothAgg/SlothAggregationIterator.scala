@@ -165,9 +165,7 @@ extends Iterator[InternalRow] with Logging {
 
     nonIncMeta.dataType match {
       case DoubleType =>
-        val bufVal = buffer.getDouble(bufOffset)
-        val rowVal = row.getDouble(rowOffset)
-        rowVal == bufVal
+        buffer.getDouble(bufOffset) == row.getDouble(rowOffset)
       case LongType =>
         buffer.getLong(bufOffset) == row.getLong(rowOffset)
       case IntegerType =>

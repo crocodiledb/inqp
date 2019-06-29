@@ -59,7 +59,7 @@ object DataUtils {
   def writeToSink(query_result: DataFrame): Unit = {
     val q = query_result
       .writeStream
-      .outputMode("complete")
+      .outputMode("append")
       .format("console")
       .trigger(Trigger.ProcessingTime("2 seconds"))
       .start()

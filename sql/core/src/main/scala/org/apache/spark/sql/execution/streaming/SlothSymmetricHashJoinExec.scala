@@ -355,7 +355,11 @@ case class SlothSymmetricHashJoinExec(
       case RightOuter =>
         val stateIter = rightSideJoiner.scanAndRemoveOldState()
         val outerOutputIter = stateIter
-          .filter(kvRow => kvRow.valueWithCounter.counter == 0)
+          .filter(kvRow => {
+            logInfo(s"value ${kvRow.valueWithCounter.value}," +
+              s"counter ${kvRow.valueWithCounter.counter}")
+            kvRow.valueWithCounter.counter == 0
+          })
           .map(kvRow => {
             kvRow.valueWithCounter.decCounter
             joinedRow1.cleanStates()
@@ -553,16 +557,15 @@ case class SlothSymmetricHashJoinExec(
         && joinSide == RightSide)
         || ((joinType == RightOuter || joinType == FullOuter)
         && joinSide == LeftSide)) {
-        otherSideJoiner.joinStateManager.getAll(insertKey).filter(valueWithCounter => {
-          if (valueWithCounter.counter == -1) true
-          else false
-        }).map(valueWithCounter => {
-          valueWithCounter.incCounter
-          val joinedRow = generateRow(valueWithCounter.value)
-          joinedRow.cleanStates()
-          joinedRow.setInsert(false)
-          joinedRow
-        })
+        otherSideJoiner.joinStateManager.getAll(insertKey)
+          .filter(valueWithCounter => valueWithCounter.counter == -1)
+          .map(valueWithCounter => {
+            valueWithCounter.incCounter
+            val joinedRow = generateRow(valueWithCounter.value)
+            joinedRow.cleanStates()
+            joinedRow.setInsert(false)
+            joinedRow
+          })
       } else {
         Iterator()
       }
@@ -887,6 +890,26 @@ case class SlothSymmetricHashJoinExec(
 
     }: Iterator[JoinedRow]
 
+    private def antiIsFirstMatch (otherSideJoiner: OneSideHashJoiner, key: UnsafeRow): Boolean = {
+      otherSideJoiner.joinStateManager.getAll(key).exists(valueWithCounter => {
+        valueWithCounter.counter == -1})
+    }
+
+    private def genAntiJoinInsertIter(insertKey: UnsafeRow,
+                                      otherSideJoiner: OneSideHashJoiner): Iterator[JoinedRow] = {
+      if (joinSide == RightSide && antiIsFirstMatch(otherSideJoiner, insertKey)) {
+        otherSideJoiner.joinStateManager.getAll(insertKey)
+          .map(valueWithCounter => {
+            valueWithCounter.incCounter
+            val joinedRow = outerInsertJoinedRow.withLeft(valueWithCounter.value)
+                .withRight(nullRight)
+            joinedRow.cleanStates()
+            joinedRow.setInsert(false)
+            joinedRow
+          })
+      } else Iterator()
+    }
+
     private val LeftAntiJoinOneRow = (thisRow: UnsafeRow,
                deleteRow: UnsafeRow,
                isInsert: Boolean,
@@ -907,7 +930,7 @@ case class SlothSymmetricHashJoinExec(
 
           // Check the unmatched case
           outerIter = outerIter ++ genOuterJoinDeleteIter(deleteKey, deleteRow)
-          outerIter = outerIter ++ genOuterJoinInsertIter(insertKey, otherSideJoiner)
+          outerIter = outerIter ++ genAntiJoinInsertIter(insertKey, otherSideJoiner)
 
         } else { // Updates on non-key columns, counters unchanged
           outerIter = genOuterJoinUpdateIter(insertKey, insertRow, deleteRow)
@@ -919,7 +942,7 @@ case class SlothSymmetricHashJoinExec(
 
       } else {
         if (isInsert) {
-          outerIter = genOuterJoinInsertIter(key, otherSideJoiner)
+          outerIter = genAntiJoinInsertIter(key, otherSideJoiner)
           insertAndUpdateCounter(otherSideJoiner, key, thisRow)
         }
         else {
@@ -1058,11 +1081,7 @@ case class SlothSymmetricHashJoinExec(
     }
 
     def scanAndRemoveOldState(): Iterator[KeyWithIndexAndValueWithCounter] = {
-       stateWatermarkPredicate match {
-        case Some(JoinStateKeyWatermarkPredicate(expr)) =>
-          joinStateManager.scanAndremoveByKeyCondition(stateKeyWatermarkPredicateFunc, true)
-        case _ => Iterator.empty
-      }
+      joinStateManager.scanAndremoveByKeyCondition(stateKeyWatermarkPredicateFunc, true)
     }
 
     /** Commit changes to the buffer state and return the state store metrics */
