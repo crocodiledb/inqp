@@ -110,10 +110,10 @@ object TPCHSchema {
   val nationPath = "hdfs://localhost:9000/tpch_data/nation.tbl"
   val regionPath = "hdfs://localhost:9000/tpch_data/region.tbl"
 
-  val numMiniBatch = 3
+  val numMiniBatch = 4
   val scaleFactor = 1
 
-  val lineitemSize = 600000 * scaleFactor
+  val lineitemSize = 600572 * scaleFactor
   val ordersSize = 150000 * scaleFactor
   val customerSize = 15000 * scaleFactor
   val partSize = 20000 * scaleFactor
