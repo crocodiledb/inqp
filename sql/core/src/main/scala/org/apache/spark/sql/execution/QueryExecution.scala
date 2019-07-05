@@ -102,6 +102,9 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
   // Several optimization techniques by SlothDB
   def slothdbOptimization(): Unit = {
     // SlothDB: Set delta output for the last aggregate
+    // TODO: this assumes sort operator, if exists,
+    // TODO: is at the end of a query plan preceded by an aggregate
+    // TODO: and the sort operator always recomputes
     markDeltaOutput(executedPlan)
 
     // SlothDB: Set whether we need to propogate updates from join operators
