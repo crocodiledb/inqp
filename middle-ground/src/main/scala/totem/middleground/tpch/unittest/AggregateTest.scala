@@ -58,9 +58,10 @@ class AggregateTest (bootstrap: String, query: String) {
         max($"l_quantity").as("max_qty"),
         min($"l_quantity").as("min_qty"),
         sum_disc_price($"l_extendedprice", $"l_discount").as("sum_disc_price")
-      )
+      ).orderBy($"l_returnflag", $"l_linestatus")
 
-    DataUtils.writeToSink(result)
+    result.explain()
+    // DataUtils.writeToSink(result)
   }
 
   // Two cascading aggregation with predicates

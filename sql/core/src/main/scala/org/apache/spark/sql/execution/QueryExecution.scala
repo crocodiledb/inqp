@@ -89,17 +89,20 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     plan.children.foreach(child => optimizeProjJoinPattern(child))
   }
 
+  private def markDeltaOutput(plan: SparkPlan): Unit = {
+    plan match {
+      case _: SlothSymmetricHashJoinExec | _: SlothThetaJoinExec =>
+      case aggPlan: SlothHashAggregateExec =>
+        aggPlan.setDeltaOutput(false)
+      case _ =>
+        plan.children.foreach(child => markDeltaOutput(child))
+    }
+  }
+
   // Several optimization techniques by SlothDB
   def slothdbOptimization(): Unit = {
-    // SlothDB: Set delta output for the last operator before sink
-    val plan = executedPlan.children(0).children(0)
-    if (plan != null) {
-      plan match {
-        case aggPlan: SlothHashAggregateExec =>
-          aggPlan.setDeltaOutput(false)
-        case _ =>
-      }
-    }
+    // SlothDB: Set delta output for the last aggregate
+    markDeltaOutput(executedPlan)
 
     // SlothDB: Set whether we need to propogate updates from join operators
     // This is based on the observation where if the projected output columns
