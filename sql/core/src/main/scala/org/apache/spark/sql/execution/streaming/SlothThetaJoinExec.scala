@@ -1,0 +1,542 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.spark.sql.execution.streaming
+
+import java.util.concurrent.TimeUnit.NANOSECONDS
+
+import scala.collection.mutable.ListBuffer
+
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.catalyst.{InternalRow}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, JoinedRow, Literal, UnsafeProjection, UnsafeRow}
+import org.apache.spark.sql.catalyst.plans._
+import org.apache.spark.sql.catalyst.plans.logical.EventTimeWatermark._
+import org.apache.spark.sql.catalyst.plans.physical._
+import org.apache.spark.sql.execution.{BinaryExecNode, SparkPlan}
+import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper._
+import org.apache.spark.sql.execution.streaming.state._
+import org.apache.spark.sql.internal.SessionState
+import org.apache.spark.sql.types.IntegerType
+import org.apache.spark.util.{CompletionIterator, SerializableConfiguration}
+
+// Assuming we broadcast the right sub-tree
+case class SlothThetaJoinExec (
+    leftKeys: Seq[Expression],
+    rightKeys: Seq[Expression],
+    joinType: JoinType,
+    condition: JoinConditionSplitPredicates,
+    stateInfo: Option[StatefulOperatorStateInfo],
+    eventTimeWatermark: Option[Long],
+    stateWatermarkPredicates: JoinStateWatermarkPredicates,
+    left: SparkPlan,
+    right: SparkPlan) extends SparkPlan with BinaryExecNode with StateStoreWriter {
+
+  def this(
+      leftKeys: Seq[Expression],
+      rightKeys: Seq[Expression],
+      joinType: JoinType,
+      condition: Option[Expression],
+      left: SparkPlan,
+      right: SparkPlan) = {
+
+    this(
+      leftKeys, rightKeys, joinType, JoinConditionSplitPredicates(condition, left, right),
+      stateInfo = None, eventTimeWatermark = None,
+      stateWatermarkPredicates = JoinStateWatermarkPredicates(), left, right)
+  }
+
+  private def throwBadJoinTypeException(): Nothing = {
+    throw new IllegalArgumentException(
+      s"${getClass.getSimpleName} should not take $joinType as the JoinType")
+  }
+
+  require(
+    joinType == Cross,
+    s"${getClass.getSimpleName} should not take $joinType as the JoinType in ThetaJoin")
+  require(leftKeys.map(_.dataType) == rightKeys.map(_.dataType))
+
+  private val storeConf = new StateStoreConf(sqlContext.conf)
+  private val hadoopConfBcast = sparkContext.broadcast(
+    new SerializableConfiguration(SessionState.newHadoopConf(
+      sparkContext.hadoopConfiguration, sqlContext.conf)))
+
+  override def requiredChildDistribution: Seq[Distribution] =
+    UnspecifiedDistribution() :: SlothBroadcastDistribution() :: Nil
+
+  override def output: Seq[Attribute] = joinType match {
+    case Cross => left.output ++ right.output
+    case _ => throwBadJoinTypeException()
+  }
+
+  override def outputPartitioning: Partitioning = joinType match {
+    case Cross =>
+      PartitioningCollection(Seq(left.outputPartitioning))
+    case x =>
+      throw new IllegalArgumentException(
+        s"${getClass.getSimpleName} should not take $x as the JoinType")
+  }
+
+  override def shouldRunAnotherBatch(newMetadata: OffsetSeqMetadata): Boolean = {
+    val watermarkUsedForStateCleanup =
+      stateWatermarkPredicates.left.nonEmpty || stateWatermarkPredicates.right.nonEmpty
+
+    // Latest watermark value is more than that used in this previous executed plan
+    val watermarkHasChanged =
+      eventTimeWatermark.isDefined && newMetadata.batchWatermarkMs > eventTimeWatermark.get
+
+    watermarkUsedForStateCleanup && watermarkHasChanged
+  }
+
+  private[this] var leftPropagateUpdate = true
+  private[this] var rightPropagateUpdate = true
+
+  private[this] def attrExist(attr: Attribute, attrSet: Seq[Attribute]): Boolean = {
+    attrSet.exists(thisAttr => thisAttr.semanticEquals(attr))
+  }
+
+  private[this] def attrDiff(attrSetA: Seq[Attribute], attrSetB: Seq[Attribute]):
+  Seq[Attribute] = {
+    val retSet = new ListBuffer[Attribute]
+    attrSetA.foreach(attrA => {
+      if (!attrExist(attrA, attrSetB)) retSet += attrA
+    })
+
+    retSet
+  }
+
+  private[this] def attrIntersect(attrSetA: Seq[Attribute], attrSetB: Seq[Attribute]):
+  Seq[Attribute] = {
+    val retSet = new ListBuffer[Attribute]
+    attrSetA.foreach(attrA => {
+      if (attrExist(attrA, attrSetB)) retSet += attrA
+    })
+
+    retSet
+  }
+
+  def setPropagateUpdate(parentProjOutput: Seq[Attribute]): Unit = {
+    val leftKeyAttrs = leftKeys.map(expr => expr.asInstanceOf[Attribute])
+    val rightKeyAttrs = rightKeys.map(expr => expr.asInstanceOf[Attribute])
+
+    val leftNonKeyAttrs = attrDiff(left.output, leftKeyAttrs)
+    val rightNonKeyAttrs = attrDiff(right.output, rightKeyAttrs)
+
+    leftPropagateUpdate = attrIntersect(leftNonKeyAttrs, parentProjOutput).nonEmpty
+    rightPropagateUpdate = attrIntersect(rightNonKeyAttrs, parentProjOutput).nonEmpty
+  }
+
+  protected override def doExecute(): RDD[InternalRow] = {
+    val stateStoreCoord = sqlContext.sessionState.streamingQueryManager.stateStoreCoordinator
+    val stateStoreNames = SlothThetaJoinStateManager.allStateStoreNames(LeftSide, RightSide)
+    left.execute().stateStoreAwareZipPartitions(
+      right.execute(), stateInfo.get, stateStoreNames, stateStoreCoord)(processPartitions)
+  }
+
+  private def processPartitions(
+      leftInputIter: Iterator[InternalRow],
+      rightInputIter: Iterator[InternalRow]): Iterator[InternalRow] = {
+    if (stateInfo.isEmpty) {
+      throw new IllegalStateException(s"Cannot execute join as state info was not specified\n$this")
+    }
+
+    val numOutputRows = longMetric("numOutputRows")
+    val numUpdatedStateRows = longMetric("numUpdatedStateRows")
+    val numTotalStateRows = longMetric("numTotalStateRows")
+    val allUpdatesTimeMs = longMetric("allUpdatesTimeMs")
+    val allRemovalsTimeMs = longMetric("allRemovalsTimeMs")
+    val commitTimeMs = longMetric("commitTimeMs")
+    val stateMemory = longMetric("stateMemory")
+
+    val updateStartTimeNs = System.nanoTime
+    val joinedRow1 = new JoinedRow
+    val joinedRow2 = new JoinedRow
+
+    val postJoinFilter =
+      newPredicate(condition.bothSides.getOrElse(Literal(true)), left.output ++ right.output).eval _
+    val leftSideJoiner = new OneSideHashJoiner(
+      LeftSide, left.output, leftKeys, leftInputIter,
+      condition.leftSideOnly, postJoinFilter, stateWatermarkPredicates.left)
+    val rightSideJoiner = new OneSideHashJoiner(
+      RightSide, right.output, rightKeys, rightInputIter,
+      condition.rightSideOnly, postJoinFilter, stateWatermarkPredicates.right)
+
+    //  Join one side input using the other side's buffered/state rows. Here is how it is done.
+    //
+    //  - `leftJoiner.joinWith(rightJoiner)` generates all rows from matching new left input with
+    //    stored right input, and also stores all the left input
+    //
+    //  - `rightJoiner.joinWith(leftJoiner)` generates all rows from matching new right input with
+    //    stored left input, and also stores all the right input. It also generates all rows from
+    //    matching new left input with new right input, since the new left input has become stored
+    //    by that point. This tiny asymmetry is necessary to avoid duplication.
+    val leftOutputIter = leftSideJoiner.storeAndJoinWithOtherSide(rightSideJoiner,
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow1.cleanStates()
+        joinedRow1.withLeft(input).withRight(matched)
+      },
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow2.cleanStates()
+        joinedRow2.withLeft(input).withRight(matched)
+      }
+    )
+
+    val rightOutputIter = rightSideJoiner.storeAndJoinWithOtherSide(leftSideJoiner,
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow1.cleanStates()
+        joinedRow1.withLeft(matched).withRight(input)
+      },
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow2.cleanStates()
+        joinedRow2.withLeft(matched).withRight(input)
+      })
+
+    // We need to save the time that the inner join output iterator completes, since outer join
+    // output counts as both update and removal time.
+    var innerOutputCompletionTimeNs: Long = 0
+    def onInnerOutputCompletion: Unit = {
+      innerOutputCompletionTimeNs = System.nanoTime
+    }
+
+    // This is the iterator which produces the inner join rows.
+    val outputIter = CompletionIterator[InternalRow, Iterator[InternalRow]](
+      leftOutputIter ++ rightOutputIter, onInnerOutputCompletion)
+
+    val outputProjection = UnsafeProjection.create(left.output ++ right.output, output)
+    val outputIterWithMetrics = outputIter.map { row =>
+      numOutputRows += 1
+      val projectedRow = outputProjection(row)
+      projectedRow.setInsert(row.isInsert)
+      projectedRow.setUpdate(row.isUpdate)
+      projectedRow
+    }
+
+    // Function to remove old state after all the input has been consumed and output generated
+    def onOutputCompletion = {
+      // All processing time counts as update time.
+      allUpdatesTimeMs += math.max(NANOSECONDS.toMillis(System.nanoTime - updateStartTimeNs), 0)
+
+      // Processing time between inner output completion and here comes from the outer portion of a
+      // join, and thus counts as removal time as we remove old state from one side while iterating.
+      if (innerOutputCompletionTimeNs != 0) {
+        allRemovalsTimeMs +=
+          math.max(NANOSECONDS.toMillis(System.nanoTime - innerOutputCompletionTimeNs), 0)
+      }
+
+      // Commit all state changes and update state store metrics
+      commitTimeMs += timeTakenMs {
+        val leftSideMetrics = leftSideJoiner.commitStateAndGetMetrics()
+        val rightSideMetrics = rightSideJoiner.commitStateAndGetMetrics()
+        val combinedMetrics = StateStoreMetrics.combine(Seq(leftSideMetrics, rightSideMetrics))
+
+        // Update SQL metrics
+        numUpdatedStateRows +=
+          (leftSideJoiner.numUpdatedStateRows + rightSideJoiner.numUpdatedStateRows)
+        numTotalStateRows += combinedMetrics.numKeys
+        stateMemory += combinedMetrics.memoryUsedBytes
+        combinedMetrics.customMetrics.foreach { case (metric, value) =>
+          longMetric(metric.name) += value
+        }
+      }
+    }
+
+    CompletionIterator[InternalRow, Iterator[InternalRow]](
+      outputIterWithMetrics, onOutputCompletion)
+  }
+
+  /**
+   * Internal helper class to consume input rows, generate join output rows using other sides
+   * buffered state rows, and finally clean up this sides buffered state rows
+   *
+   * @param joinSide The JoinSide - either left or right.
+   * @param inputAttributes The input attributes for this side of the join.
+   * @param joinKeys The join keys.
+   * @param inputIter The iterator of input rows on this side to be joined.
+   * @param preJoinFilterExpr A filter over rows on this side. This filter rejects rows that could
+   *                          never pass the overall join condition no matter what other side row
+   *                          they're joined with.
+   * @param postJoinFilter A filter over joined rows. This filter completes the application of
+   *                       the overall join condition, assuming that preJoinFilter on both sides
+   *                       of the join has already been passed.
+   *                       Passed as a function rather than expression to avoid creating the
+   *                       predicate twice; we also need this filter later on in the parent exec.
+   * @param stateWatermarkPredicate The state watermark predicate. See
+   *                                [[StreamingSymmetricHashJoinExec]] for further description of
+   *                                state watermarks.
+   */
+  private class OneSideHashJoiner(
+      joinSide: JoinSide,
+      inputAttributes: Seq[Attribute],
+      joinKeys: Seq[Expression],
+      inputIter: Iterator[InternalRow],
+      preJoinFilterExpr: Option[Expression],
+      postJoinFilter: InternalRow => Boolean,
+      stateWatermarkPredicate: Option[JoinStateWatermarkPredicate]) {
+
+    // Filter the joined rows based on the given condition.
+    val preJoinFilter: InternalRow => Boolean =
+      newPredicate(preJoinFilterExpr.getOrElse(Literal(true)), inputAttributes).eval _
+
+    private val joinStateManager = new SlothThetaJoinStateManager(
+      joinSide, inputAttributes, stateInfo, storeConf, hadoopConfBcast.value.value)
+
+    private[this] val thisWIDGenerator = UnsafeProjection.create(joinKeys, inputAttributes)
+    private[this] var thisWID: UnsafeRow = _
+    private[this] val thisDeleteWIDGenerator = UnsafeProjection.create(joinKeys, inputAttributes)
+    private[this] var thisDeleteWID: UnsafeRow = _
+    private[this] val thatWIDGenerator = UnsafeProjection.create(joinKeys, inputAttributes)
+
+    private[this] val stateKeyWatermarkPredicateFunc = stateWatermarkPredicate match {
+      case Some(JoinStateKeyWatermarkPredicate(expr)) =>
+        // inputSchema can be empty as expr should only have BoundReferences and does not require
+        // the schema to generated predicate. See [[StreamingSymmetricHashJoinHelper]].
+        newPredicate(expr, Seq.empty).eval _
+      case _ =>
+        newPredicate(Literal(false), Seq.empty).eval _ // false = do not remove if no predicate
+    }
+
+    private[this] val keyRow = genEmptyKeyRow()
+    private[this] val deleteKeyRow = genEmptyKeyRow()
+
+    private[this] val keyGenerator = (row: UnsafeRow) => {
+      keyRow.setInt(0, row.hashCode())
+      keyRow}: UnsafeRow
+
+    private[this] val deleteKeyGenerator = (row: UnsafeRow) => {
+      deleteKeyRow.setInt(0, row.hashCode())
+      deleteKeyRow}: UnsafeRow
+
+    private[this] val removeCondition = (row: UnsafeRow) => {
+      if (joinKeys.isEmpty) false
+      else {
+        val thatWID = thatWIDGenerator(row)
+        stateKeyWatermarkPredicateFunc(thatWID)
+      }
+    }: Boolean
+
+    private[this] val internalWindowCondition = (row: UnsafeRow) => {
+      val thatWID = thatWIDGenerator(row)
+      thisWID.equals(thatWID)
+    }: Boolean
+
+    private[this] val internalDeleteWindowCondition = (row: UnsafeRow) => {
+      val thatWID = thatWIDGenerator(row)
+      thisDeleteWID.equals(thatWID)
+    }: Boolean
+
+    private[this] val noWindowCondition = (_: UnsafeRow) => {true}
+
+    private[this] def getWindowCondition(thisRow: UnsafeRow):
+      (UnsafeRow) => Boolean = {
+      if (joinKeys.isEmpty) return noWindowCondition
+      else {
+        thisWID = thisWIDGenerator(thisRow)
+        return internalWindowCondition
+      }
+    }
+
+    private[this] def getDeleteWindowCondition(thisRow: UnsafeRow):
+      (UnsafeRow) => Boolean = {
+      if (joinKeys.isEmpty) return noWindowCondition
+      else {
+        thisDeleteWID = thisDeleteWIDGenerator(thisRow)
+        return internalDeleteWindowCondition
+      }
+    }
+
+    private[this] var updatedStateRowsCount = 0
+
+    private def genEmptyKeyRow(): UnsafeRow = {
+      val numFields = 1
+      val rowSize = UnsafeRow.calculateBitSetWidthInBytes(numFields) + IntegerType.defaultSize
+      UnsafeRow.createFromByteArray(rowSize, numFields)
+    }
+
+    private[this] def generateUpdateIter(deleteIter: Iterator[JoinedRow],
+      insertIter: Iterator[JoinedRow],
+      postJoinFilter: (InternalRow) => Boolean): Iterator[JoinedRow] = {
+
+      deleteIter.zip(insertIter).
+        flatMap((rowPair) => {
+          val deleteJoinedRow = rowPair._1
+          val insertJoinedRow = rowPair._2
+          deleteJoinedRow.cleanStates()
+          insertJoinedRow.cleanStates()
+          deleteJoinedRow.setInsert(false)
+          insertJoinedRow.setInsert(true)
+
+          val deletePass = postJoinFilter(deleteJoinedRow)
+          val insertPass = postJoinFilter(insertJoinedRow)
+          if (deletePass && !insertPass) {
+            Seq(deleteJoinedRow)
+          } else if (!deletePass && insertPass) {
+            Seq(insertJoinedRow)
+
+          } else if (deletePass && insertPass &&
+            ((joinSide == LeftSide && leftPropagateUpdate) ||
+              (joinSide == RightSide && rightPropagateUpdate))) {
+            deleteJoinedRow.setUpdate(true)
+            Seq(deleteJoinedRow, insertJoinedRow)
+          } else {
+            Iterator()
+          }
+        })
+    }
+
+    private val thetaJoinOneRow = (thisRow: UnsafeRow,
+                   deleteRow: UnsafeRow,
+                   isInsert: Boolean,
+                   updateCase: Boolean,
+                   otherSideJoiner: OneSideHashJoiner,
+                   generateJoinedRow1: (InternalRow, InternalRow) => JoinedRow,
+                   generateJoinedRow2: (InternalRow, InternalRow) => JoinedRow) =>
+    {
+      val key = keyGenerator(thisRow)
+      val windowCondition = getWindowCondition(thisRow)
+      var outputIter = otherSideJoiner.joinStateManager.
+        getAllAndRemove(windowCondition, removeCondition).map(thatRow => {
+        val joinedRow = generateJoinedRow1(thisRow, thatRow)
+        joinedRow.setInsert(isInsert)
+        joinedRow
+      })
+
+      if (updateCase) {
+        val insertIter = outputIter
+        val insertRow = thisRow
+        val insertKey = key
+
+        val deleteKey = deleteKeyGenerator(deleteRow)
+        val deleteWindowCondition = getDeleteWindowCondition(deleteRow)
+        val deleteIter = otherSideJoiner.joinStateManager.
+          getAllAndRemove(deleteWindowCondition, removeCondition).
+          map{thatRow => {
+            val joinedRow = generateJoinedRow2(deleteRow, thatRow)
+            joinedRow
+          }}
+
+        outputIter = generateUpdateIter(deleteIter, insertIter, postJoinFilter)
+
+        updatedStateRowsCount += 2
+        joinStateManager.remove(deleteKey, deleteRow)
+        joinStateManager.append(insertKey, insertRow)
+
+      } else {
+        outputIter = outputIter.filter(postJoinFilter)
+
+        updatedStateRowsCount += 1
+        if (isInsert) joinStateManager.append(key, thisRow)
+        else joinStateManager.remove(key, thisRow)
+      }
+
+      outputIter
+    }: Iterator[JoinedRow]
+
+    def generateJoinOneRow(): (UnsafeRow, UnsafeRow, Boolean, Boolean, OneSideHashJoiner,
+      (InternalRow, InternalRow) => JoinedRow, (InternalRow, InternalRow) => JoinedRow)
+      => Iterator[JoinedRow] = {
+      joinType match {
+        case Cross =>
+          thetaJoinOneRow
+        case _ => throwBadJoinTypeException()
+      }
+    }
+
+    private val joinOneRow = generateJoinOneRow()
+
+    /**
+     * Generate joined rows by consuming input from this side, and matching it with the buffered
+     * rows (i.e. state) of the other side.
+     * @param otherSideJoiner   Joiner of the other side
+     * @param generateJoinedRow1 Function to generate the joined row from the
+     *                          input row from this side and the matched row from the other side
+     * @param generateJoinedRow2 Function to generate the joined row from the
+     *                          input row from this side and the matched row from the other side
+     */
+    def storeAndJoinWithOtherSide(
+        otherSideJoiner: OneSideHashJoiner,
+        generateJoinedRow1: (InternalRow, InternalRow) => JoinedRow,
+        generateJoinedRow2: (InternalRow, InternalRow) => JoinedRow):
+    Iterator[InternalRow] = {
+      val watermarkAttribute = inputAttributes.find(_.metadata.contains(delayKey))
+      val nonLateRows =
+        WatermarkSupport.watermarkExpression(watermarkAttribute, eventTimeWatermark) match {
+          case Some(watermarkExpr) =>
+            val predicate = newPredicate(watermarkExpr, inputAttributes)
+            inputIter.filter { row => !predicate.eval(row) }
+          case None =>
+            inputIter
+        }
+
+      var updateCase = false
+      var deleteRow: UnsafeRow = null
+
+      nonLateRows.flatMap { row =>
+        val thisRow = row.asInstanceOf[UnsafeRow]
+        // If this row fails the pre join filter, that means it can never satisfy the full join
+        // condition no matter what other side row it's matched with. This allows us to avoid
+        // adding it to the state, and generate an outer join row immediately (or do nothing in
+        // the case of inner join).
+
+        val isInsert = thisRow.isInsert
+        val isUpdate = thisRow.isUpdate
+
+        if (preJoinFilter(thisRow)) {
+          thisRow.cleanStates()
+
+          // In update case
+          if (updateCase) {
+            assert(isInsert,
+              "In the update case, the current row must be an insert")
+            updateCase = false
+            joinOneRow(thisRow, deleteRow, isInsert, true, otherSideJoiner,
+              generateJoinedRow1, generateJoinedRow2)
+          } else {
+            // A delete row that indicates a insert follows; begin an update case
+            if (!isInsert && isUpdate) {
+              updateCase = true
+              if (deleteRow == null) deleteRow = thisRow.copy()
+              else deleteRow.copyFrom(thisRow)
+              Iterator()
+            } else {
+              joinOneRow(thisRow, deleteRow, isInsert, false, otherSideJoiner,
+                generateJoinedRow1, generateJoinedRow2)
+            }
+          }
+        } else {
+          // When an update is modelled as a delete and insert,
+          // and the delete passes the filter, but the insert does not,
+          // so we need to process the delete as a single delete
+          if (updateCase) {
+            assert(isInsert, "In the update case, the current row must be an insert")
+            updateCase = false
+            joinOneRow(deleteRow, deleteRow, false, false, otherSideJoiner,
+              generateJoinedRow1, generateJoinedRow2)
+          } else Iterator()
+
+        }
+      }
+    }
+
+    /** Commit changes to the buffer state and return the state store metrics */
+    def commitStateAndGetMetrics(): StateStoreMetrics = {
+      joinStateManager.commit()
+      joinStateManager.metrics
+    }
+
+    def numUpdatedStateRows: Long = updatedStateRowsCount
+  }
+}

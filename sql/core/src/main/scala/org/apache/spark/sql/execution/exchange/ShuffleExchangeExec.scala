@@ -231,9 +231,15 @@ object ShuffleExchangeExec {
           override def numPartitions: Int = 1
           override def getPartition(key: Any): Int = 0
         }
+      case SlothBroadcastPartitioning(broadCastnumPartitions) =>
+        new Partitioner {
+          override def numPartitions: Int = broadCastnumPartitions
+          override def getPartition(key: Any): Int = -1
+        }
       case _ => sys.error(s"Exchange not implemented for $newPartitioning")
       // TODO: Handle BroadcastPartitioning.
     }
+
     def getPartitionKeyExtractor(): InternalRow => Any = newPartitioning match {
       case RoundRobinPartitioning(numPartitions) =>
         // Distributes elements evenly across output partitions, starting from a random partition.
@@ -246,7 +252,7 @@ object ShuffleExchangeExec {
       case h: HashPartitioning =>
         val projection = UnsafeProjection.create(h.partitionIdExpression :: Nil, outputAttributes)
         row => projection(row).getInt(0)
-      case RangePartitioning(_, _) | SinglePartition => identity
+      case RangePartitioning(_, _) | SinglePartition | SlothBroadcastPartitioning(_) => identity
       case _ => sys.error(s"Exchange not implemented for $newPartitioning")
     }
 
@@ -301,16 +307,35 @@ object ShuffleExchangeExec {
       // round-robin function is order sensitive if we don't sort the input.
       val isOrderSensitive = isRoundRobin && !SQLConf.get.sortBeforeRepartition
       if (needToCopyObjectsBeforeShuffle(part)) {
-        newRdd.mapPartitionsWithIndexInternal((_, iter) => {
-          val getPartitionKey = getPartitionKeyExtractor()
-          iter.map { row => (part.getPartition(getPartitionKey(row)), row.copy()) }
-        }, isOrderSensitive = isOrderSensitive)
+        newPartitioning match {
+          case SlothBroadcastPartitioning(numPartitions) =>
+            newRdd.mapPartitionsWithIndexInternal((_, iter) => {
+              iter.flatMap{row => {
+                (0 until numPartitions).map(partID => (partID, row.copy()))
+              }}
+            }, isOrderSensitive = isOrderSensitive)
+          case _ =>
+            newRdd.mapPartitionsWithIndexInternal((_, iter) => {
+              val getPartitionKey = getPartitionKeyExtractor()
+              iter.map { row => (part.getPartition(getPartitionKey(row)), row.copy()) }
+            }, isOrderSensitive = isOrderSensitive)
+        }
       } else {
-        newRdd.mapPartitionsWithIndexInternal((_, iter) => {
-          val getPartitionKey = getPartitionKeyExtractor()
-          val mutablePair = new MutablePair[Int, InternalRow]()
-          iter.map { row => mutablePair.update(part.getPartition(getPartitionKey(row)), row) }
-        }, isOrderSensitive = isOrderSensitive)
+        newPartitioning match {
+          case SlothBroadcastPartitioning(numPartitions) =>
+            newRdd.mapPartitionsWithIndexInternal((_, iter) => {
+              val mutablePair = new MutablePair[Int, InternalRow]()
+              iter.flatMap{row => {
+                (0 until numPartitions).map(partID => mutablePair.update(partID, row))
+              }}
+            }, isOrderSensitive = isOrderSensitive)
+          case _ =>
+            newRdd.mapPartitionsWithIndexInternal((_, iter) => {
+              val getPartitionKey = getPartitionKeyExtractor()
+              val mutablePair = new MutablePair[Int, InternalRow]()
+              iter.map { row => mutablePair.update(part.getPartition(getPartitionKey(row)), row) }
+            }, isOrderSensitive = isOrderSensitive)
+        }
       }
     }
 

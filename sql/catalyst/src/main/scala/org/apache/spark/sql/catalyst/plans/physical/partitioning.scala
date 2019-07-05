@@ -151,6 +151,14 @@ case class BroadcastDistribution(mode: BroadcastMode) extends Distribution {
   }
 }
 
+case class SlothBroadcastDistribution() extends Distribution {
+  override def requiredNumPartitions: Option[Int] = None
+
+  override def createPartitioning(numPartitions: Int): Partitioning = {
+    SlothBroadcastPartitioning(numPartitions)
+  }
+}
+
 /**
  * Describes how an operator's output is split across partitions. It has 2 major properties:
  *   1. number of partitions.
@@ -323,6 +331,14 @@ case class BroadcastPartitioning(mode: BroadcastMode) extends Partitioning {
 
   override def satisfies0(required: Distribution): Boolean = required match {
     case BroadcastDistribution(m) if m == mode => true
+    case _ => false
+  }
+}
+
+case class SlothBroadcastPartitioning(numPartitions: Int) extends Partitioning {
+
+  override def satisfies0(required: Distribution): Boolean = required match {
+    case SlothBroadcastDistribution() => true
     case _ => false
   }
 }

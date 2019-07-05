@@ -151,6 +151,7 @@ case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
         child
       case (child, BroadcastDistribution(mode)) =>
         BroadcastExchangeExec(mode, child)
+      // SlothDB: SlothBroadcastDistribution falls into this case
       case (child, distribution) =>
         val numPartitions = distribution.requiredNumPartitions
           .getOrElse(defaultNumPreShufflePartitions)
