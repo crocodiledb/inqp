@@ -30,7 +30,7 @@ import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.aggregate.SlothHashAggregateExec
 import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCommandExec, ShowTablesCommand}
 import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange}
-import org.apache.spark.sql.execution.streaming.SlothSymmetricHashJoinExec
+import org.apache.spark.sql.execution.streaming.{SlothSymmetricHashJoinExec, SlothThetaJoinExec}
 import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampType, _}
 import org.apache.spark.util.Utils
 
@@ -79,6 +79,9 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
       case projPlan: ProjectExec if projPlan.children.nonEmpty =>
         if (projPlan.child.isInstanceOf[SlothSymmetricHashJoinExec]) {
           val joinPlan = projPlan.child.asInstanceOf[SlothSymmetricHashJoinExec]
+          joinPlan.setPropagateUpdate(projPlan.output)
+        } else if (projPlan.child.isInstanceOf[SlothThetaJoinExec]) {
+          val joinPlan = projPlan.child.asInstanceOf[SlothThetaJoinExec]
           joinPlan.setPropagateUpdate(projPlan.output)
         }
       case _ =>

@@ -23,8 +23,8 @@ import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, Literal, SpecificInternalRow, UnsafeProjection, UnsafeRow}
-import org.apache.spark.sql.execution.streaming.{StatefulOperatorStateInfo}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Literal, SpecificInternalRow, UnsafeProjection, UnsafeRow}
+import org.apache.spark.sql.execution.streaming.StatefulOperatorStateInfo
 import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper._
 import org.apache.spark.sql.types.{IntegerType, LongType, StructField, StructType}
 import org.apache.spark.util.NextIterator
@@ -357,14 +357,14 @@ class SlothThetaJoinStateManager (
       }
     }
 
-    def iterator: Iterator[KeyWithIndexAndValue] = {
-      val keyWithIndexAndValue = new KeyWithIndexAndValue()
-      stateStore.getRange(None, None).map { pair =>
-        keyWithIndexAndValue.withNew(
-          keyRowGenerator(pair.key), pair.key.getLong(indexOrdinalInKeyWithIndexRow), pair.value)
-        keyWithIndexAndValue
-      }
-    }
+    // def iterator: Iterator[KeyWithIndexAndValue] = {
+    //   val keyWithIndexAndValue = new KeyWithIndexAndValue()
+    //   stateStore.getRange(None, None).map { pair =>
+    //     keyWithIndexAndValue.withNew(
+    //       keyRowGenerator(pair.key), pair.key.getLong(indexOrdinalInKeyWithIndexRow), pair.value)
+    //     keyWithIndexAndValue
+    //   }
+    // }
 
     /** Generated a row using the key and index */
     private def keyWithIndexRow(key: UnsafeRow, valueIndex: Long): UnsafeRow = {

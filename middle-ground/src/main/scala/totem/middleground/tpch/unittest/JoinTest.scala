@@ -39,6 +39,8 @@ class JoinTest (bootstrap: String, query: String) {
         execOuterJoin(spark)
       case "q_semijoin" | "q_antijoin" =>
         execSemiAntiJoin(spark)
+      case "q_thetajoin" =>
+        execThetaJoin(spark)
       case _ =>
         printf("Join test does not supported %s yet\n", query)
     }
@@ -106,6 +108,26 @@ class JoinTest (bootstrap: String, query: String) {
 
     DataUtils.writeToSink(result)
   }
+
+  def execThetaJoin(spark: SparkSession): Unit = {
+    import spark.implicits._
+
+    // val avgQuantity = new AvgQuantity
+    val sumDoulbe = new SumExtendedprice
+
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
+      .filter($"p_brand" === "Brand#14" and $"p_type" === "SMALL ANODIZED STEEL")
+
+    val aggP = DataUtils.loadStreamTable(spark, "part", "p")
+        .agg((sumDoulbe($"p_retailprice") / 20000) as "sum_retailprice")
+
+    val result = p.join(aggP, $"p_retailprice" > $"sum_retailprice", "cross")
+        .select($"p_partkey", $"p_retailprice")
+
+    // result.explain()
+    DataUtils.writeToSink(result)
+  }
+
 }
 
 object JoinTest {

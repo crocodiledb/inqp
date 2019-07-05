@@ -34,7 +34,18 @@ import org.apache.spark.sql.internal.SessionState
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.util.{CompletionIterator, SerializableConfiguration}
 
-// Assuming we broadcast the right sub-tree
+/** Assuming we broadcast the right sub-tree
+ *
+ * @param leftKeys If not empty, they indicate the window ID
+ * @param rightKeys If not empty, they indicate the window ID
+ * @param joinType Must be Cross (i.e. ThetaJoin)
+ * @param condition
+ * @param stateInfo
+ * @param eventTimeWatermark
+ * @param stateWatermarkPredicates
+ * @param left
+ * @param right
+ */
 case class SlothThetaJoinExec (
     leftKeys: Seq[Expression],
     rightKeys: Seq[Expression],
@@ -75,8 +86,9 @@ case class SlothThetaJoinExec (
     new SerializableConfiguration(SessionState.newHadoopConf(
       sparkContext.hadoopConfiguration, sqlContext.conf)))
 
-  override def requiredChildDistribution: Seq[Distribution] =
-    UnspecifiedDistribution() :: SlothBroadcastDistribution() :: Nil
+  override def requiredChildDistribution: Seq[Distribution] = {
+    UnspecifiedDistribution :: new SlothBroadcastDistribution() :: Nil
+  }
 
   override def output: Seq[Attribute] = joinType match {
     case Cross => left.output ++ right.output
@@ -423,10 +435,10 @@ case class SlothThetaJoinExec (
         val deleteWindowCondition = getDeleteWindowCondition(deleteRow)
         val deleteIter = otherSideJoiner.joinStateManager.
           getAllAndRemove(deleteWindowCondition, removeCondition).
-          map{thatRow => {
+          map(thatRow => {
             val joinedRow = generateJoinedRow2(deleteRow, thatRow)
             joinedRow
-          }}
+          })
 
         outputIter = generateUpdateIter(deleteIter, insertIter, postJoinFilter)
 

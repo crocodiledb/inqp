@@ -394,20 +394,25 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           if left.isStreaming && right.isStreaming =>
 
           if (SlothDBContext.enable_slothdb) {
-             new SlothSymmetricHashJoinExec(
-              leftKeys, rightKeys, joinType, condition, planLater(left), planLater(right)) :: Nil
+            if (joinType != Cross) {
+              new SlothSymmetricHashJoinExec(
+                leftKeys, rightKeys, joinType, condition, planLater(left), planLater(right)) :: Nil
+            }
+            else {
+              new SlothThetaJoinExec(
+                leftKeys, rightKeys, joinType, condition, planLater(left), planLater(right)) :: Nil
+            }
           }
           else {
             new StreamingSymmetricHashJoinExec(
               leftKeys, rightKeys, joinType, condition, planLater(left), planLater(right)) :: Nil
           }
 
-        case Join(left, right, _, _) if left.isStreaming && right.isStreaming =>
+        case Join(left, right, joinType, condition) if left.isStreaming && right.isStreaming =>
 
-          if (SlothDBContext.enable_slothdb) {
-            new SlothBroadcastJoinExec(
-              null, null, null, null, None, None,
-              null, planLater(left), planLater(right)) :: Nil
+          if (SlothDBContext.enable_slothdb && joinType == Cross) {
+            new SlothThetaJoinExec(
+              Seq.empty, Seq.empty, joinType, condition, planLater(left), planLater(right)) :: Nil
           }
           else {
             throw new AnalysisException(

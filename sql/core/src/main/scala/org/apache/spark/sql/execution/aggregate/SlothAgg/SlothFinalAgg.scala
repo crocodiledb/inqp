@@ -156,6 +156,7 @@ class SlothFinalAgg(
                       else {groupingProjection.apply(input)}
     val output = generateOutput(groupingKey, bufferProjection.apply(input))
     output.setInsert(input.isInsert)
+    output.setUpdate(input.isUpdate)
 
     output
   }: InternalRow

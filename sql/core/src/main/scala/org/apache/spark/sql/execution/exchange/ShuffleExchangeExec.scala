@@ -310,7 +310,7 @@ object ShuffleExchangeExec {
         newPartitioning match {
           case SlothBroadcastPartitioning(numPartitions) =>
             newRdd.mapPartitionsWithIndexInternal((_, iter) => {
-              iter.flatMap{row => {
+              iter.flatMap { row => {
                 (0 until numPartitions).map(partID => (partID, row.copy()))
               }}
             }, isOrderSensitive = isOrderSensitive)
