@@ -19,7 +19,8 @@ package totem.middleground.tpch.unittest
 
 import totem.middleground.tpch.DataUtils
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
 
 // scalastyle:off println
 

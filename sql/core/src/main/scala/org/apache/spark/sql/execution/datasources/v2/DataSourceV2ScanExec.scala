@@ -116,6 +116,7 @@ case class DataSourceV2ScanExec(
       WholeStageCodegenExec(this)(codegenStageId = 0).execute()
     } else {
       val numOutputRows = longMetric("numOutputRows")
+      // SlothDB
       inputRDD.map { r =>
         numOutputRows += 1
         r.setInsert(true)

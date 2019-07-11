@@ -59,6 +59,7 @@ class AggregateTest (bootstrap: String, query: String) {
         min($"l_quantity").as("min_qty"),
         sum_disc_price($"l_extendedprice", $"l_discount").as("sum_disc_price")
       ).orderBy($"l_returnflag", $"l_linestatus")
+      .dropDuplicates()
 
     result.explain()
     // DataUtils.writeToSink(result)

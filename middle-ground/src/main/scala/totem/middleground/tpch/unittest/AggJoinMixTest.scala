@@ -45,21 +45,21 @@ class AggJoinMixTest (bootstrap: String, query: String) {
     val avgQuantity = new AvgQuantity
     val sumExtendedprice = new SumExtendedprice
 
-    // val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
-    // val p = DataUtils.loadStreamTable(spark, "part", "p")
-    //   .filter($"p_brand" === "Brand#23" and $"p_container" === "MED BOX")
+    val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+    val p = DataUtils.loadStreamTable(spark, "part", "p")
+      .filter($"p_brand" === "Brand#23" and $"p_container" === "MED BOX")
 
     val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .groupBy($"l_partkey")
       .agg((avgQuantity($"l_quantity") * 0.2).as("avg_quantity"))
       .select($"l_partkey".as("agg_l_partkey"), $"avg_quantity")
 
-    // val result = l.join(p, $"l_partkey" === $"p_partkey")
-    //   .join(agg_l, $"p_partkey" === $"agg_l_partkey" and
-    //     $"l_quantity" < $"avg_quantity")
-    //   .agg((sumExtendedprice($"l_extendedprice") / 7.0).as("avg_yearly"))
+    val result = l.join(p, $"l_partkey" === $"p_partkey")
+      .join(agg_l, $"p_partkey" === $"agg_l_partkey" and
+        $"l_quantity" < $"avg_quantity")
+      .agg((sumExtendedprice($"l_extendedprice") / 7.0).as("avg_yearly"))
 
-    DataUtils.writeToSink(agg_l)
+    DataUtils.writeToSink(result)
   }
 }
 

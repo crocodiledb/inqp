@@ -74,7 +74,8 @@ object LoadTPCH {
 
     val loader = new LoadTPCH(args(0))
 
-    val loadTables = List("Part", "PartSupp", "Supplier", "Customer", "Orders", "Lineitem")
+    val loadTables = List("Part", "PartSupp", "Supplier", "Customer",
+                          "Orders", "Lineitem", "Nation", "Region")
     val loadThreads = loadTables.map(new WritingThread(loader, _))
 
     loadThreads.map(_.start())

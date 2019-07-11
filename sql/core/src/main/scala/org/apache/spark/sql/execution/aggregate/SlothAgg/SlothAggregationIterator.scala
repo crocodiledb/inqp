@@ -322,7 +322,7 @@ extends Iterator[InternalRow] with Logging {
   }
 
   private def processInputs(): Unit = {
-    if (groupingExpressions.isEmpty) {
+    if (groupingExpressions.isEmpty && inputIter.hasNext) {
       // If there is no grouping expressions, we can just reuse the same buffer over and over again.
       // Note that it would be better to eliminate the hash map entirely in the future.
       val groupingKey = groupingProjection.apply(null)

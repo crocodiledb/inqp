@@ -44,6 +44,10 @@ case class ShuffleExchangeExec(
     child: SparkPlan,
     @transient coordinator: Option[ExchangeCoordinator]) extends Exchange {
 
+  def withNewPartitioning(realPartitioning: Partitioning): Unit = {
+    newPartitioning = realPartitioning
+  }
+
   // NOTE: coordinator can be null after serialization/deserialization,
   //       e.g. it can be null on the Executor side
 
@@ -324,10 +328,14 @@ object ShuffleExchangeExec {
         newPartitioning match {
           case SlothBroadcastPartitioning(numPartitions) =>
             newRdd.mapPartitionsWithIndexInternal((_, iter) => {
-              val mutablePair = new MutablePair[Int, InternalRow]()
+              val mutablePairArray = Array.fill(numPartitions)(new MutablePair[Int, InternalRow]())
               iter.flatMap{row => {
-                (0 until numPartitions).map(partID => mutablePair.update(partID, row))
-              }}
+                mutablePairArray.zipWithIndex.map(pairWithIndex => {
+                  val pair = pairWithIndex._1
+                  val partID = pairWithIndex._2
+                  pair.update(partID, row)
+                })}
+              }
             }, isOrderSensitive = isOrderSensitive)
           case _ =>
             newRdd.mapPartitionsWithIndexInternal((_, iter) => {

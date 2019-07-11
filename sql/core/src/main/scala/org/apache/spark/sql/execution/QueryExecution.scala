@@ -25,11 +25,12 @@ import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnsupportedOperationChecker
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, ReturnAnswer}
+import org.apache.spark.sql.catalyst.plans.physical.SlothBroadcastDistribution
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.aggregate.SlothHashAggregateExec
 import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCommandExec, ShowTablesCommand}
-import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange}
+import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.streaming.{SlothSymmetricHashJoinExec, SlothThetaJoinExec}
 import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampType, _}
 import org.apache.spark.util.Utils
@@ -99,6 +100,31 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     }
   }
 
+  private def findValidNumPartition(plan: SparkPlan): Int = {
+    if (plan.children.isEmpty) {
+      throw new IllegalArgumentException("Not found valid number of partitions")
+    }
+    if (plan.outputPartitioning.numPartitions != 0) {
+      return plan.outputPartitioning.numPartitions
+    }
+    return plan.children.map(child => findValidNumPartition(child)).max
+  }
+
+  private def updatePartitioningforThetaJoin(plan: SparkPlan): Unit = {
+    plan match {
+      case thetaJoin: SlothThetaJoinExec =>
+        require(thetaJoin.right.isInstanceOf[ShuffleExchangeExec],
+          "Right child of ThetaJoin needs to be ShuffleExechangeExec")
+        val left = thetaJoin.left
+        val right = thetaJoin.right.asInstanceOf[ShuffleExchangeExec]
+        val slothBroadCast = new SlothBroadcastDistribution()
+        val slothNumPartitions = findValidNumPartition(left)
+        right.withNewPartitioning(slothBroadCast.createPartitioning(slothNumPartitions))
+      case _ =>
+    }
+    plan.children.foreach(child => updatePartitioningforThetaJoin(child))
+  }
+
   // Several optimization techniques by SlothDB
   def slothdbOptimization(): Unit = {
     // SlothDB: Set delta output for the last aggregate
@@ -112,6 +138,9 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     // do not have overlap with the non-key columns from child operators,
     // we do not need to propagate the updates
     optimizeProjJoinPattern(executedPlan)
+
+    // SlothDB
+    updatePartitioningforThetaJoin(executedPlan)
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be

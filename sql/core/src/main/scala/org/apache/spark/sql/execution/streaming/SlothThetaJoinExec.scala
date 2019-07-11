@@ -512,7 +512,7 @@ case class SlothThetaJoinExec (
           // In update case
           if (updateCase) {
             assert(isInsert,
-              "In the update case, the current row must be an insert")
+              s"On ${joinSide}: in the update case, the current row must be an insert")
             updateCase = false
             joinOneRow(thisRow, deleteRow, isInsert, true, otherSideJoiner,
               generateJoinedRow1, generateJoinedRow2)

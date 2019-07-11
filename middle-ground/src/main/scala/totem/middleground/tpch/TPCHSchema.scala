@@ -26,6 +26,8 @@ object TPCHSchema {
   val customerTopics = "Customer"
   val ordersTopics = "Orders"
   val lineitemTopics = "Lineitem"
+  val nationTopics = "Nation"
+  val regionTopics = "Region"
 
   val checkpointLocation = "hdfs://localhost:9000/tpch_checkpoint"
 
@@ -106,9 +108,11 @@ object TPCHSchema {
   val customerPath = datadir + "/customer"
   val ordersPath = datadir + "/orders"
   val lineitemPath = datadir + "/lineitem"
+  val nationPath = datadir  + "/nation"
+  val regionPath = datadir + "/region"
 
-  val nationPath = "hdfs://localhost:9000/tpch_data/nation.tbl"
-  val regionPath = "hdfs://localhost:9000/tpch_data/region.tbl"
+  // val nationPath = "hdfs://localhost:9000/tpch_data/nation.tbl"
+  // val regionPath = "hdfs://localhost:9000/tpch_data/region.tbl"
 
   val numMiniBatch = 4
   val scaleFactor = 1
@@ -119,6 +123,8 @@ object TPCHSchema {
   val partSize = 20000 * scaleFactor
   val partsuppSize = 80000 * scaleFactor
   val supplierSize = 1000 * scaleFactor
+  val nationSize = 25
+  val regionSize = 5
 
   val lineitemOffset = (lineitemSize + numMiniBatch - 1) / numMiniBatch
   val supplierOffset = (supplierSize + numMiniBatch - 1) / numMiniBatch
@@ -126,6 +132,8 @@ object TPCHSchema {
   val partsuppOffset = (partsuppSize + numMiniBatch - 1) / numMiniBatch
   val customerOffset = (customerSize + numMiniBatch - 1) / numMiniBatch
   val ordersOffset = (ordersSize + numMiniBatch - 1) / numMiniBatch
+  val nationOffset = 25
+  val regionOffset = 5
 
   def GetMetaData(tableName: String) : Option[Tuple4[StructType, String, String, Long]] =
   {
@@ -143,9 +151,9 @@ object TPCHSchema {
       case "lineitem" =>
         Some((lineitemSchema, lineitemPath, lineitemTopics, lineitemOffset))
       case "nation" =>
-        Some((nationSchema, nationPath, null, 0L))
+        Some((nationSchema, nationPath, nationTopics, nationOffset))
       case "region" =>
-        Some((regionSchema, regionPath, null, 0L))
+        Some((regionSchema, regionPath, regionTopics, regionOffset))
       case _ =>
         printf("Unrecoganized Table %s\n", tableName)
         throw new Exception("Unrecoganized Table")

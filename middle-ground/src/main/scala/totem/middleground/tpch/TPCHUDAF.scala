@@ -22,8 +22,146 @@ import org.apache.spark.sql.expressions.MutableAggregationBuffer
 import org.apache.spark.sql.expressions.UserDefinedAggregateFunction
 import org.apache.spark.sql.types._
 
+// sum over double
+class DoubleSum extends  UserDefinedAggregateFunction {
+  override def inputSchema: org.apache.spark.sql.types.StructType =
+    StructType(StructField("double", DoubleType) :: Nil)
+
+  override def bufferSchema: StructType = StructType(
+    StructField("sum", DoubleType) :: Nil)
+
+  override def dataType: DataType = DoubleType
+
+  override def deterministic: Boolean = true
+
+  override def initialize(buffer: MutableAggregationBuffer): Unit = {
+    buffer(0) = 0.0
+  }
+
+  override def update(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    buffer(0) = buffer.getDouble(0) + input.getDouble(0)
+  }
+
+  override def delete(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    buffer(0) = buffer.getDouble(0) - input.getDouble(0)
+  }
+
+  override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
+    buffer1(0) = buffer1.getDouble(0) + buffer2.getDouble(0)
+  }
+
+  override def evaluate(buffer: Row): Any = {
+    buffer.getDouble(0)
+  }
+}
+
+// Avg over double
+class DoubleAvg extends  UserDefinedAggregateFunction {
+  override def inputSchema: org.apache.spark.sql.types.StructType =
+    StructType(StructField("input", DoubleType) :: Nil)
+
+  override def bufferSchema: StructType = StructType(
+    StructField("count", DoubleType) ::
+    StructField("sum", DoubleType) :: Nil
+  )
+
+  override def dataType: DataType = DoubleType
+
+  override def deterministic: Boolean = true
+
+  override def initialize(buffer: MutableAggregationBuffer): Unit = {
+    buffer(0) = 0.0
+    buffer(1) = 0.0
+  }
+
+  override def update(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    buffer(0) = buffer.getDouble(0) + 1.0
+    buffer(1) = buffer.getDouble(1) + input.getDouble(0)
+  }
+
+  override def delete(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    buffer(0) = buffer.getDouble(0) - 1.0
+    buffer(1) = buffer.getDouble(1) - input.getDouble(0)
+  }
+
+  override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
+    buffer1(0) = buffer1.getDouble(0) + buffer2.getDouble(0)
+    buffer1(1) = buffer1.getDouble(1) + buffer2.getDouble(1)
+  }
+
+  override def evaluate(buffer: Row): Any = {
+    buffer.getDouble(1)/buffer.getDouble(0)
+  }
+}
+
+// Count
+class Count extends  UserDefinedAggregateFunction {
+  override def inputSchema: org.apache.spark.sql.types.StructType =
+    StructType(StructField("input", IntegerType) :: Nil)
+
+  override def bufferSchema: StructType = StructType(
+    StructField("count", IntegerType) :: Nil)
+
+  override def dataType: DataType = IntegerType
+
+  override def deterministic: Boolean = true
+
+  override def initialize(buffer: MutableAggregationBuffer): Unit = {
+    buffer(0) = 0
+  }
+
+  override def update(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    buffer(0) = buffer.getInt(0) + 1
+  }
+
+  override def delete(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    buffer(0) = buffer.getInt(0) - 1
+  }
+
+  override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
+    buffer1(0) = buffer1.getInt(0) + buffer2.getInt(0)
+  }
+
+  override def evaluate(buffer: Row): Any = {
+    buffer.getInt(0)
+  }
+}
+
+// Count not null
+class Count_not_null extends  UserDefinedAggregateFunction {
+  override def inputSchema: org.apache.spark.sql.types.StructType =
+    StructType(StructField("input", LongType) :: Nil)
+
+  override def bufferSchema: StructType = StructType(
+    StructField("count", LongType) :: Nil)
+
+  override def dataType: DataType = LongType
+
+  override def deterministic: Boolean = true
+
+  override def initialize(buffer: MutableAggregationBuffer): Unit = {
+    buffer(0) = 0L
+  }
+
+  override def update(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    if (!input.isNullAt(0)) buffer(0) = buffer.getLong(0) + 1
+  }
+
+  override def delete(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    if (!input.isNullAt(0)) buffer(0) = buffer.getLong(0) - 1
+  }
+
+  override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
+    buffer1(0) = buffer1.getLong(0) + buffer2.getLong(0)
+  }
+
+  override def evaluate(buffer: Row): Any = {
+    buffer.getLong(0)
+  }
+}
+
 // sum(l_extendedprice * (1 - l_discount))
-class Q1_sum_disc_price extends  UserDefinedAggregateFunction {
+class Sum_disc_price extends  UserDefinedAggregateFunction {
      // This is the input fields for your aggregate function.
   override def inputSchema: org.apache.spark.sql.types.StructType =
     StructType(StructField("l_extendedprice", DoubleType) ::
@@ -56,6 +194,53 @@ class Q1_sum_disc_price extends  UserDefinedAggregateFunction {
   // This is how to merge two objects with the bufferSchema type.
   override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
     buffer1(0) = buffer1.getAs[Double](0) + buffer2.getAs[Double](0)
+  }
+
+  // This is where you output the final value, given the final value of your bufferSchema.
+  override def evaluate(buffer: Row): Any = {
+    buffer.getDouble(0)
+  }
+}
+
+// sum(l_extendedprice * (1 - l_discount)) * (tax + 1)
+class Sum_disc_price_with_tax extends  UserDefinedAggregateFunction {
+     // This is the input fields for your aggregate function.
+  override def inputSchema: org.apache.spark.sql.types.StructType =
+    StructType(StructField("l_extendedprice", DoubleType) ::
+      StructField("l_discount", DoubleType) ::
+      StructField("tax", DoubleType) :: Nil)
+
+  // This is the internal fields you keep for computing your aggregate.
+  override def bufferSchema: StructType = StructType(
+    StructField("sum_disc_price_with_tax", DoubleType) :: Nil
+  )
+
+  // This is the output type of your aggregatation function.
+  override def dataType: DataType = DoubleType
+
+  override def deterministic: Boolean = true
+
+  // This is the initial value for your buffer schema.
+  override def initialize(buffer: MutableAggregationBuffer): Unit = {
+    buffer(0) = 0.0
+  }
+
+  // This is how to update your buffer schema given an input.
+  override def update(buffer: MutableAggregationBuffer, input: Row): Unit = {
+      buffer(0) = buffer.getDouble(0) +
+        input.getDouble(0) * (1 - input.getDouble(1)) *
+        (1 + input.getDouble(2))
+  }
+
+  override def delete(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    buffer(0) = buffer.getAs[Double](0) -
+        input.getDouble(0) * (1 - input.getDouble(1)) *
+        (1 + input.getDouble(2))
+  }
+
+  // This is how to merge two objects with the bufferSchema type.
+  override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
+    buffer1(0) = buffer1.getDouble(0) + buffer2.getDouble(0)
   }
 
   // This is where you output the final value, given the final value of your bufferSchema.

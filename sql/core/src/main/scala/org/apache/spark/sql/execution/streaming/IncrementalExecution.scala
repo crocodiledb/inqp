@@ -173,6 +173,13 @@ class IncrementalExecution(
               slothThetaJoin.left.output, slothThetaJoin.right.output,
               slothThetaJoin.leftKeys, slothThetaJoin.rightKeys,
               slothThetaJoin.condition.full, Some(offsetSeqMetadata.batchWatermarkMs)))
+
+      case SlothDeduplicateExec(keys, child, None, None) =>
+        SlothDeduplicateExec(
+          keys,
+          child,
+          Some(nextStatefulOperationStateInfo),
+          Some(offsetSeqMetadata.batchWatermarkMs))
     }
   }
 

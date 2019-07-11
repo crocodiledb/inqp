@@ -358,7 +358,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
   object StreamingDeduplicationStrategy extends Strategy {
     override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
       case Deduplicate(keys, child) if child.isStreaming =>
-        StreamingDeduplicateExec(keys, planLater(child)) :: Nil
+        if (SlothDBContext.enable_slothdb) SlothDeduplicateExec(keys, planLater(child)) :: Nil
+        else StreamingDeduplicateExec(keys, planLater(child)) :: Nil
 
       case _ => Nil
     }

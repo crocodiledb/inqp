@@ -59,8 +59,10 @@ class SlothAggMetaMap (
   }
 
   def decCounter(groupkey: UnsafeRow): Unit = {
-    hashMap(groupkey).counter -= 1
-    assert(hashMap(groupkey).counter >= 0, "AGG Counter should never be less than 0")
+    val metaData = hashMap(groupkey)
+    metaData.counter -= 1
+    assert(metaData.counter >= 0,
+      "AGG Counter should never be less than 0")
   }
 
   def getCounter(groupkey: UnsafeRow): Int = {
