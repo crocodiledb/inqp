@@ -183,7 +183,7 @@ class QueryTPCH (bootstrap: String, query: String)
       .agg(
         sum_disc_price($"l_extendedprice", $"l_discount").alias("revenue"))
       .orderBy(desc("revenue"), $"o_orderdate")
-      // .select("l_orderkey", "revenue", "o_orderdate", "o_shippriority")
+      .select("l_orderkey", "revenue", "o_orderdate", "o_shippriority")
       // .limit(10)
 
     // result.explain(false)
@@ -517,12 +517,14 @@ class QueryTPCH (bootstrap: String, query: String)
 
     val s = DataUtils.loadStreamTable(spark, "supplier", "s")
     val revenue = execQ15_subquery(spark)
-    // val max_revenue = execQ15_subquery(spark).select(max($"total_revenue").as("max_revenue"))
+    val max_revenue = execQ15_subquery(spark).agg(max($"total_revenue").as("max_revenue"))
 
+    // val result = revenue.join(max_revenue, $"total_revenue" === $"max_revenue")
+    //     .select($"supplier_no", $"total_revenue")
     val result = s.join(revenue, $"s_suppkey" === $"supplier_no")
-      // .join(max_revenue, $"total_revenue" === $"max_revenue")
-      .select("s_suppkey", "s_name", "s_address", "s_phone", "total_revenue")
-      .orderBy("s_suppkey")
+     .join(max_revenue, $"total_revenue" === $"max_revenue")
+     .select("s_suppkey", "s_name", "s_address", "s_phone", "total_revenue")
+     .orderBy("s_suppkey")
 
     // result.explain(true)
     DataUtils.writeToSink(result)

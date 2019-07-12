@@ -4,6 +4,19 @@ set work_mem to 1000000;
 set enable_nestloop to on; 
 set enable_mergejoin to on;
 
+--select
+--	l_suppkey,
+--	sum(l_extendedprice * (1 - l_discount)) as total_revenue
+--from
+--	lineitem
+--where
+--	l_shipdate >= date '1996-01-01'
+--	and l_shipdate < date '1996-01-01' + interval '3' month
+--group by
+--	l_suppkey
+--order by
+--    total_revenue desc;
+
 
 create view revenue1 (supplier_no, total_revenue) as
 	select

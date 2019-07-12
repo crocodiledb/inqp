@@ -491,13 +491,13 @@ case class SlothSymmetricHashJoinExec(
         nullInsertJoinedRow.withLeft(row).withRight(nullRight)
     } else {
       deleteThisNullRow = (row: InternalRow) =>
-        nullDeleteJoinedRow.withRight(nullLeft).withLeft(row)
+        nullDeleteJoinedRow.withRight(nullRight).withLeft(row)
       insertThisNullRow = (row: InternalRow) =>
-        nullInsertJoinedRow.withRight(nullLeft).withLeft(row)
+        nullInsertJoinedRow.withRight(nullRight).withLeft(row)
       deleteThatNullRow = (row: InternalRow) =>
-        nullDeleteJoinedRow.withRight(row).withLeft(nullRight)
+        nullDeleteJoinedRow.withRight(row).withLeft(nullLeft)
       insertThatNullRow = (row: InternalRow) =>
-        nullInsertJoinedRow.withRight(row).withLeft(nullRight)
+        nullInsertJoinedRow.withRight(row).withLeft(nullLeft)
     }
 
     private[this] def deleteGenNullIter(otherSideJoiner: OneSideHashJoiner,
@@ -1119,7 +1119,8 @@ case class SlothSymmetricHashJoinExec(
           // In update case
           if (updateCase) {
             assert(isInsert,
-              "In the update case, the current row must be an insert")
+              s"On ${joinSide} of ${condition}: " +
+                s"in the update case, the current row must be an insert")
             updateCase = false
             joinOneRow(thisRow, deleteRow, isInsert, true, otherSideJoiner,
               generateJoinedRow1, generateJoinedRow2)

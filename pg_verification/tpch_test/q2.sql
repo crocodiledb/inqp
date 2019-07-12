@@ -4,8 +4,6 @@ set work_mem to 1000000;
 set enable_nestloop to on; 
 set enable_mergejoin to on;
 
-select count(*)
-from (
 select
 	s_acctbal,
 	s_name,
@@ -47,5 +45,5 @@ order by
 	s_acctbal desc,
 	n_name,
 	s_name,
-	p_partkey) as a;
+	p_partkey;
 
