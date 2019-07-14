@@ -88,12 +88,15 @@ case class SlothFinalAggExec (
   def isAggregateExpr(expr: NamedExpression): Boolean = {
     val attr = expr match {
       case alias: Alias =>
-        alias.child.asInstanceOf[AttributeReference]
+        if (alias.child.isInstanceOf[AttributeReference]) {
+          alias.child.asInstanceOf[AttributeReference]
+        } else {
+          return true
+        }
       case attrRef: AttributeReference =>
         attrRef
       case _ =>
-        throw new IllegalArgumentException("Named expression should" +
-          "be Alias or AttributeReference")
+        return true
     }
 
     !groupingExpressions.exists(namedExpr => namedExpr.toAttribute.semanticEquals(attr))
