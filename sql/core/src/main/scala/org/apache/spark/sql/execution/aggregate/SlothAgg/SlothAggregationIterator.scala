@@ -42,18 +42,14 @@ class SlothAggregationIterator (
     originalInputAttributes: Seq[Attribute],
     inputIter: Iterator[InternalRow],
     numOutputRows: SQLMetric,
-    numUpdatedStateRows: SQLMetric,
-    numTotalStateRows: SQLMetric,
-    allUpdatesTimeMs: SQLMetric,
-    allRemovalsTimeMs: SQLMetric,
-    commitTimeMs: SQLMetric,
     stateMemory: SQLMetric,
     stateInfo: Option[StatefulOperatorStateInfo],
     storeConf: StateStoreConf,
     hadoopConf: Configuration,
     watermarkForKey: Option[Predicate],
     watermarkForData: Option[Predicate],
-    deltaOutput: Boolean)
+    deltaOutput: Boolean,
+    updateOuput: Boolean)
 extends Iterator[InternalRow] with Logging {
 
   // Initialize all AggregateFunctions by binding references if necessary,
@@ -418,13 +414,13 @@ extends Iterator[InternalRow] with Logging {
     // Updating average hashmap probe
     // avgHashProbe.set(hashMapforResult.getAverageProbesPerLookup())
 
-    val numKeys = stateStoreforResult.getNumKeys() +
-      hashMapforMetaData.getNumKeys() +
-      {
-        if (hashMapforFullData != null) { hashMapforFullData.getNumKeys }
-        else { 0L }
-      }
-    numTotalStateRows.set(numKeys)
+    // val numKeys = stateStoreforResult.getNumKeys() +
+    //   hashMapforMetaData.getNumKeys() +
+    //   {
+    //     if (hashMapforFullData != null) { hashMapforFullData.getNumKeys }
+    //     else { 0L }
+    //   }
+    // numTotalStateRows.set(numKeys)
 
   })
 
@@ -456,7 +452,7 @@ extends Iterator[InternalRow] with Logging {
       if (oldGroupValue != null && newGroupValue != null) {
         ret = generateOutput(groupKey, oldGroupValue)
         ret.setInsert(false)
-        ret.setUpdate(true)
+        ret.setUpdate(true && updateOuput)
         oldGroupValue = null
 
         // This is a delete

@@ -24,11 +24,12 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnsupportedOperationChecker
+import org.apache.spark.sql.catalyst.expressions.{Attribute, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, ReturnAnswer}
-import org.apache.spark.sql.catalyst.plans.physical.SlothBroadcastDistribution
+import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, SlothBroadcastDistribution}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
-import org.apache.spark.sql.execution.aggregate.SlothHashAggregateExec
+import org.apache.spark.sql.execution.aggregate.{SlothFinalAggExec, SlothHashAggregateExec}
 import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCommandExec, ShowTablesCommand}
 import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.streaming.{SlothSymmetricHashJoinExec, SlothThetaJoinExec}
@@ -125,6 +126,48 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     plan.children.foreach(child => updatePartitioningforThetaJoin(child))
   }
 
+  private def setUpdateOutput(plan: SparkPlan, updateAttrs: Seq[Attribute]): Unit = {
+    if (plan == null || plan.isInstanceOf[ShuffleExchangeExec]) return
+    if (!SlothUtils.attrIntersect(plan.output, updateAttrs).isEmpty) {
+      plan.setUpdateOutput(false)
+      plan.children.foreach(child => setUpdateOutput(child, updateAttrs))
+    }
+  }
+
+  private def getUpdateAttributes(plan: SparkPlan) : Seq[Attribute] = {
+    if (plan == null) return Seq()
+
+    plan match {
+      case thetaJoinExec: SlothThetaJoinExec =>
+        SlothUtils.attrUnion(getUpdateAttributes(thetaJoinExec.left),
+          getUpdateAttributes(thetaJoinExec.right))
+
+      case equalJoinExec: SlothSymmetricHashJoinExec =>
+        SlothUtils.attrUnion(getUpdateAttributes(equalJoinExec.left),
+          getUpdateAttributes(equalJoinExec.right))
+
+      case aggExec: SlothFinalAggExec =>
+        aggExec.findUpdateAttributes()
+
+      case shuffleExec: ShuffleExchangeExec
+        if shuffleExec.newPartitioning.isInstanceOf[HashPartitioning] =>
+        val partAttrs = shuffleExec.newPartitioning.asInstanceOf[HashPartitioning]
+          .expressions.map(_.asInstanceOf[NamedExpression].toAttribute)
+        val retUpdateAttrs = getUpdateAttributes(plan.children(0))
+        setUpdateOutput(shuffleExec.children(0),
+          SlothUtils.attrIntersect(partAttrs, retUpdateAttrs))
+        retUpdateAttrs
+
+      case projExec: ProjectExec =>
+        SlothUtils.attrIntersect(getUpdateAttributes(plan.children(0)), projExec.output)
+
+      case _ => // FilterExec, DataSourceV2Scan, HashAggFinal, Sort
+        if (plan.children != null && !plan.children.isEmpty) {
+          getUpdateAttributes(plan.children(0))
+        } else Seq()
+    }
+  }
+
   // Several optimization techniques by SlothDB
   def slothdbOptimization(): Unit = {
     // SlothDB: Set delta output for the last aggregate
@@ -141,6 +184,9 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
 
     // SlothDB
     updatePartitioningforThetaJoin(executedPlan)
+
+    // Output Update
+    getUpdateAttributes(executedPlan)
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be

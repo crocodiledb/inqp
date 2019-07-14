@@ -21,6 +21,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.errors._
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution._
@@ -84,9 +85,29 @@ case class SlothFinalAggExec (
     }
   }
 
+  def isAggregateExpr(expr: NamedExpression): Boolean = {
+    val attr = expr match {
+      case alias: Alias =>
+        alias.child.asInstanceOf[AttributeReference]
+      case attrRef: AttributeReference =>
+        attrRef
+      case _ =>
+        throw new IllegalArgumentException("Named expression should" +
+          "be Alias or AttributeReference")
+    }
+
+    !groupingExpressions.exists(namedExpr => namedExpr.toAttribute.semanticEquals(attr))
+  }
+
+  def findUpdateAttributes(): Seq[Attribute] = {
+    resultExpressions.filter(isAggregateExpr).map(_.toAttribute)
+  }
+
   override def verboseString: String = toString(verbose = true)
 
   override def simpleString: String = toString(verbose = false)
+
+  override def setUpdateOutput(updateOutput: Boolean): Unit = child.setUpdateOutput(updateOutput)
 
   private def toString(verbose: Boolean): String = {
     val allAggregateExpressions = aggregateExpressions

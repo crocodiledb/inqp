@@ -21,10 +21,11 @@ package totem.middleground.tpch
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 
-class QueryTPCH (bootstrap: String, query: String)
+class QueryTPCH (bootstrap: String, query: String, numBatch: Int, SF: Int)
 {
 
   DataUtils.bootstrap = bootstrap
+  TPCHSchema.setMetaData(numBatch, SF)
 
   def execQuery(query: String): Unit = {
     val spark = SparkSession.builder()
@@ -161,7 +162,6 @@ class QueryTPCH (bootstrap: String, query: String)
         $"p_partkey", $"p_mfgr", $"s_address", $"s_phone", $"s_comment")
       .limit(100)
 
-    // result.explain(false)
     DataUtils.writeToSink(result)
   }
 
@@ -751,12 +751,12 @@ class QueryTPCH (bootstrap: String, query: String)
 object QueryTPCH {
   def main(args: Array[String]): Unit = {
 
-    if (args.length < 2) {
-      System.err.println("Usage: QueryTPCH <bootstrap-servers> <query>")
+    if (args.length < 4) {
+      System.err.println("Usage: QueryTPCH <bootstrap-servers> <query> <numBatch> <SF>")
       System.exit(1)
     }
 
-    val tpch = new QueryTPCH(args(0), args(1))
+    val tpch = new QueryTPCH(args(0), args(1), args(2).toInt, args(3).toInt)
     tpch.execQuery(args(1))
   }
 }

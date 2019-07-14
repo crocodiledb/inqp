@@ -27,7 +27,8 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, Generic
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical.EventTimeWatermark._
 import org.apache.spark.sql.catalyst.plans.physical._
-import org.apache.spark.sql.execution.{BinaryExecNode, SparkPlan}
+import org.apache.spark.sql.execution.{BinaryExecNode, SlothMetricsTracker, SlothUtils, SparkPlan}
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper._
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.internal.SessionState
@@ -133,7 +134,7 @@ case class SlothSymmetricHashJoinExec(
     eventTimeWatermark: Option[Long],
     stateWatermarkPredicates: JoinStateWatermarkPredicates,
     left: SparkPlan,
-    right: SparkPlan) extends SparkPlan with BinaryExecNode with StateStoreWriter {
+    right: SparkPlan) extends SparkPlan with BinaryExecNode with SlothMetricsTracker {
 
   def this(
       leftKeys: Seq[Expression],
@@ -160,6 +161,15 @@ case class SlothSymmetricHashJoinExec(
     joinType == LeftSemi || joinType == LeftAnti,
     s"${getClass.getSimpleName} should not take $joinType as the JoinType")
   require(leftKeys.map(_.dataType) == rightKeys.map(_.dataType))
+
+  override lazy val metrics = Map(
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "leftTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "left join time"),
+    "rightTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "right join time"),
+    "scanTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "scan time"),
+    "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"),
+    "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory")
+  )
 
   private val storeConf = new StateStoreConf(sqlContext.conf)
   private val hadoopConfBcast = sparkContext.broadcast(
@@ -201,53 +211,23 @@ case class SlothSymmetricHashJoinExec(
         s"${getClass.getSimpleName} should not take $x as the JoinType")
   }
 
-  override def shouldRunAnotherBatch(newMetadata: OffsetSeqMetadata): Boolean = {
-    val watermarkUsedForStateCleanup =
-      stateWatermarkPredicates.left.nonEmpty || stateWatermarkPredicates.right.nonEmpty
-
-    // Latest watermark value is more than that used in this previous executed plan
-    val watermarkHasChanged =
-      eventTimeWatermark.isDefined && newMetadata.batchWatermarkMs > eventTimeWatermark.get
-
-    watermarkUsedForStateCleanup && watermarkHasChanged
-  }
-
   private[this] var leftPropagateUpdate = true
   private[this] var rightPropagateUpdate = true
+  private[this] var updateOutput = true
 
-  private[this] def attrExist(attr: Attribute, attrSet: Seq[Attribute]): Boolean = {
-    attrSet.exists(thisAttr => thisAttr.semanticEquals(attr))
-  }
-
-  private[this] def attrDiff(attrSetA: Seq[Attribute], attrSetB: Seq[Attribute]):
-  Seq[Attribute] = {
-    val retSet = new ListBuffer[Attribute]
-    attrSetA.foreach(attrA => {
-      if (!attrExist(attrA, attrSetB)) retSet += attrA
-    })
-
-    retSet
-  }
-
-  private[this] def attrIntersect(attrSetA: Seq[Attribute], attrSetB: Seq[Attribute]):
-  Seq[Attribute] = {
-    val retSet = new ListBuffer[Attribute]
-    attrSetA.foreach(attrA => {
-      if (attrExist(attrA, attrSetB)) retSet += attrA
-    })
-
-    retSet
+  override def setUpdateOutput(updateOutput: Boolean): Unit = {
+    this.updateOutput = updateOutput
   }
 
   def setPropagateUpdate(parentProjOutput: Seq[Attribute]): Unit = {
     val leftKeyAttrs = leftKeys.map(expr => expr.asInstanceOf[Attribute])
     val rightKeyAttrs = rightKeys.map(expr => expr.asInstanceOf[Attribute])
 
-    val leftNonKeyAttrs = attrDiff(left.output, leftKeyAttrs)
-    val rightNonKeyAttrs = attrDiff(right.output, rightKeyAttrs)
+    val leftNonKeyAttrs = SlothUtils.attrDiff(left.output, leftKeyAttrs)
+    val rightNonKeyAttrs = SlothUtils.attrDiff(right.output, rightKeyAttrs)
 
-    leftPropagateUpdate = attrIntersect(leftNonKeyAttrs, parentProjOutput).nonEmpty
-    rightPropagateUpdate = attrIntersect(rightNonKeyAttrs, parentProjOutput).nonEmpty
+    leftPropagateUpdate = SlothUtils.attrIntersect(leftNonKeyAttrs, parentProjOutput).nonEmpty
+    rightPropagateUpdate = SlothUtils.attrIntersect(rightNonKeyAttrs, parentProjOutput).nonEmpty
   }
 
   protected override def doExecute(): RDD[InternalRow] = {
@@ -265,14 +245,12 @@ case class SlothSymmetricHashJoinExec(
     }
 
     val numOutputRows = longMetric("numOutputRows")
-    val numUpdatedStateRows = longMetric("numUpdatedStateRows")
-    val numTotalStateRows = longMetric("numTotalStateRows")
-    val allUpdatesTimeMs = longMetric("allUpdatesTimeMs")
-    val allRemovalsTimeMs = longMetric("allRemovalsTimeMs")
+    val leftTimeMs = longMetric("leftTimeMs")
+    val rightTimeMs = longMetric("rightTimeMs")
+    val scanTimeMs = longMetric("scanTimeMs")
     val commitTimeMs = longMetric("commitTimeMs")
     val stateMemory = longMetric("stateMemory")
 
-    val updateStartTimeNs = System.nanoTime
     val joinedRow1 = new JoinedRow
     val joinedRow2 = new JoinedRow
 
@@ -315,29 +293,36 @@ case class SlothSymmetricHashJoinExec(
         joinedRow2.withLeft(matched).withRight(input)
       })
 
-    // We need to save the time that the inner join output iterator completes, since outer join
-    // output counts as both update and removal time.
-    var innerOutputCompletionTimeNs: Long = 0
-    def onInnerOutputCompletion: Unit = {
-      innerOutputCompletionTimeNs = System.nanoTime
+    var startTimeNs: Long = System.nanoTime()
+    def onLeftCompletion: Unit = {
+      val endTimeNs = System.nanoTime
+      leftTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
+      startTimeNs = endTimeNs
     }
-    // This is the iterator which produces the inner join rows. For outer joins, this will be
-    // prepended to a second iterator producing outer join rows; for inner joins, this is the full
-    // output.
-    // val innerOutputIter = CompletionIterator[InternalRow, Iterator[InternalRow]](
-    //   leftOutputIter ++ rightOutputIter, onInnerOutputCompletion)
+
+    def onRightCompletion: Unit = {
+      val endTimeNs = System.nanoTime
+      rightTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
+      startTimeNs = endTimeNs
+    }
+
+    val leftIterWithMetrics = CompletionIterator[InternalRow, Iterator[InternalRow]](
+      leftInnerIter, onLeftCompletion)
+
+    val rightIterWithMetrics = CompletionIterator[InternalRow, Iterator[InternalRow]](
+      rightInnerIter, onRightCompletion)
 
 
     // TODO: remove stale state when a window is closed
     val outputIter: Iterator[InternalRow] = joinType match {
       case Inner | LeftSemi =>
-        leftInnerIter ++ rightInnerIter
+        leftIterWithMetrics ++ rightIterWithMetrics
       case LeftOuter | LeftAnti =>
         // Run right iterator first
-        rightInnerIter ++ leftInnerIter
+        rightIterWithMetrics ++ leftIterWithMetrics
       case RightOuter =>
         // Run left iterator first
-        leftInnerIter ++ rightInnerIter
+        leftIterWithMetrics ++ rightIterWithMetrics
       case FullOuter =>
         // Run left iterator first, but does not output tuples with nulls
         // When right iterator finished, scan left state to output tuples with nulls
@@ -350,7 +335,7 @@ case class SlothSymmetricHashJoinExec(
             joinedRow1.setInsert(true)
             joinedRow1.withLeft(kvRow.valueWithCounter.value).withRight(nullRight)
           })
-        leftInnerIter ++ rightInnerIter ++ leftOuterIter
+        leftIterWithMetrics ++ rightIterWithMetrics ++ leftOuterIter
       case _ => throwBadJoinTypeException()
     }
 
@@ -359,62 +344,26 @@ case class SlothSymmetricHashJoinExec(
       numOutputRows += 1
       val projectedRow = outputProjection(row)
       projectedRow.setInsert(row.isInsert)
-      projectedRow.setUpdate(row.isUpdate)
+      projectedRow.setUpdate(row.isUpdate && updateOutput)
       projectedRow
     }
 
-    // Function to remove old state after all the input has been consumed and output generated
-    def onOutputCompletion = {
-      // All processing time counts as update time.
-      allUpdatesTimeMs += math.max(NANOSECONDS.toMillis(System.nanoTime - updateStartTimeNs), 0)
-
-      // Processing time between inner output completion and here comes from the outer portion of a
-      // join, and thus counts as removal time as we remove old state from one side while iterating.
-      if (innerOutputCompletionTimeNs != 0) {
-        allRemovalsTimeMs +=
-          math.max(NANOSECONDS.toMillis(System.nanoTime - innerOutputCompletionTimeNs), 0)
-      }
-
-      allRemovalsTimeMs += timeTakenMs {
-        // Remove any remaining state rows which aren't needed because they're below the watermark.
-        //
-        // For inner joins, we have to remove unnecessary state rows from both sides if possible.
-        // For outer joins, we have already removed unnecessary state rows from the outer side
-        // (e.g., left side for left outer join) while generating the outer "null" outputs. Now, we
-        // have to remove unnecessary state rows from the other side (e.g., right side for the left
-        // outer join) if possible. In all cases, nothing needs to be outputted, hence the removal
-        // needs to be done greedily by immediately consuming the returned iterator.
-        // TODO: we uncomment this for now
-        // val cleanupIter = joinType match {
-        //   case Inner | LeftSemi =>
-        //     leftSideJoiner.removeOldState() ++ rightSideJoiner.removeOldState()
-        //   case LeftOuter | RightOuter | FullOuter | LeftAnti => Iterator.empty
-        //   case _ => throwBadJoinTypeException()
-        // }
-        // while (cleanupIter.hasNext) {
-        //   cleanupIter.next()
-        // }
-      }
+    // TODO: we do not consider removing old state now
+    def onAllCompletion: Unit = {
+      val endTimeNs = System.nanoTime
+      scanTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
 
       // Commit all state changes and update state store metrics
       commitTimeMs += timeTakenMs {
         val leftSideMetrics = leftSideJoiner.commitStateAndGetMetrics()
         val rightSideMetrics = rightSideJoiner.commitStateAndGetMetrics()
         val combinedMetrics = StateStoreMetrics.combine(Seq(leftSideMetrics, rightSideMetrics))
-
-        // Update SQL metrics
-        numUpdatedStateRows +=
-          (leftSideJoiner.numUpdatedStateRows + rightSideJoiner.numUpdatedStateRows)
-        numTotalStateRows += combinedMetrics.numKeys
         stateMemory += combinedMetrics.memoryUsedBytes
-        combinedMetrics.customMetrics.foreach { case (metric, value) =>
-          longMetric(metric.name) += value
-        }
       }
     }
 
     CompletionIterator[InternalRow, Iterator[InternalRow]](
-      outputIterWithMetrics, onOutputCompletion)
+      outputIterWithMetrics, onAllCompletion)
   }
 
   /**
@@ -1119,7 +1068,7 @@ case class SlothSymmetricHashJoinExec(
           // In update case
           if (updateCase) {
             assert(isInsert,
-              s"On ${joinSide} of ${condition}: " +
+              s"On ${joinSide} with ${rightKeys} of ${condition}: " +
                 s"in the update case, the current row must be an insert")
             updateCase = false
             joinOneRow(thisRow, deleteRow, isInsert, true, otherSideJoiner,

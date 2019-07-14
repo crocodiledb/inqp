@@ -25,7 +25,8 @@ import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.aggregate.SlothAgg.SlothAggregationIterator
-import org.apache.spark.sql.execution.streaming.{OffsetSeqMetadata, StatefulOperatorStateInfo, StateStoreWriter, WatermarkSupport}
+import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.execution.streaming.{StatefulOperatorStateInfo, WatermarkSupport}
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.internal.SessionState
 import org.apache.spark.util.CompletionIterator
@@ -43,7 +44,7 @@ case class SlothHashAggregateExec (
     eventTimeWatermark: Option[Long],
     stateInfo: Option[StatefulOperatorStateInfo],
     child: SparkPlan)
-  extends UnaryExecNode with StateStoreWriter with WatermarkSupport {
+  extends UnaryExecNode with SlothMetricsTracker with WatermarkSupport {
 
   private[this] val aggregateBufferAttributes = {
     aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes)
@@ -55,12 +56,11 @@ case class SlothHashAggregateExec (
     child.output ++ aggregateBufferAttributes ++ aggregateAttributes ++
       aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes)
 
-  // override lazy val metrics = Map(
-  //   "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-  //   "peakMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory"),
-  //   "spillSize" -> SQLMetrics.createSizeMetric(sparkContext, "spill size"),
-  //   "aggTime" -> SQLMetrics.createTimingMetric(sparkContext, "aggregate time"),
-  //   "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"))
+  override lazy val metrics = Map(
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory"),
+    "aggTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "aggregate time"),
+    "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"))
 
   override def output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
 
@@ -98,10 +98,7 @@ case class SlothHashAggregateExec (
 
     child.execute().mapPartitionsWithIndex { (partIndex, iter) =>
       val numOutputRows = longMetric("numOutputRows")
-      val numUpdatedStateRows = longMetric("numUpdatedStateRows")
-      val numTotalStateRows = longMetric("numTotalStateRows")
-      val allUpdatesTimeMs = longMetric("allUpdatesTimeMs")
-      val allRemovalsTimeMs = longMetric("allRemovalsTimeMs")
+      val aggTimeMs = longMetric("aggTimeMs")
       val commitTimeMs = longMetric("commitTimeMs")
       val stateMemory = longMetric("stateMemory")
 
@@ -118,20 +115,16 @@ case class SlothHashAggregateExec (
             child.output,
             iter,
             numOutputRows,
-            numUpdatedStateRows,
-            numTotalStateRows,
-            allUpdatesTimeMs,
-            allRemovalsTimeMs,
-            commitTimeMs,
             stateMemory,
             stateInfo,
             storeConf,
             hadoopConfBcast.value.value,
             watermarkPredicateForKeys,
             watermarkPredicateForData,
-            deltaOutput)
+            deltaOutput,
+            updateOutput)
       aggIter = resIter
-      allUpdatesTimeMs += (System.nanoTime() - beforeAgg) / 1000000
+      aggTimeMs += (System.nanoTime() - beforeAgg) / 1000000
       CompletionIterator[InternalRow, Iterator[InternalRow]](resIter, onCompletion)
     }
   }
@@ -139,15 +132,12 @@ case class SlothHashAggregateExec (
   // all the mode of aggregate expressions
   private val modes = aggregateExpressions.map(_.mode).distinct
 
-
-  // TODO: shouldRunAnotherBatch is only invoked when noBatchDataExecution is enabled
-  override def shouldRunAnotherBatch(newMetadata: OffsetSeqMetadata): Boolean = {
-    false
-  }
-
   private[this] var deltaOutput: Boolean = true
+  private[this] var updateOutput: Boolean = true
 
   override def setDeltaOutput(isDeltaOutput: Boolean): Unit = {deltaOutput = isDeltaOutput}
+
+  override def setUpdateOutput(isUpdateOutput: Boolean): Unit = {updateOutput = isUpdateOutput}
 
   override def verboseString: String = toString(verbose = true)
 

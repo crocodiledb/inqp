@@ -114,26 +114,26 @@ object TPCHSchema {
   // val nationPath = "hdfs://localhost:9000/tpch_data/nation.tbl"
   // val regionPath = "hdfs://localhost:9000/tpch_data/region.tbl"
 
-  val numMiniBatch = 4
-  val scaleFactor = 1
+  var numMiniBatch = 4
+  var scaleFactor = 1
 
-  val lineitemSize = 600572 * scaleFactor
-  val ordersSize = 150000 * scaleFactor
-  val customerSize = 15000 * scaleFactor
-  val partSize = 20000 * scaleFactor
-  val partsuppSize = 80000 * scaleFactor
-  val supplierSize = 1000 * scaleFactor
-  val nationSize = 25
-  val regionSize = 5
+  def lineitemSize: Int = 601000 * scaleFactor
+  def ordersSize: Int = 150000 * scaleFactor
+  def customerSize: Int = 15000 * scaleFactor
+  def partSize: Int = 20000 * scaleFactor
+  def partsuppSize: Int = 80000 * scaleFactor
+  def supplierSize: Int = 1000 * scaleFactor
+  def nationSize: Int = 25
+  def regionSize: Int = 5
 
-  val lineitemOffset = (lineitemSize + numMiniBatch - 1) / numMiniBatch
-  val supplierOffset = (supplierSize + numMiniBatch - 1) / numMiniBatch
-  val partOffset = (partSize + numMiniBatch - 1) / numMiniBatch
-  val partsuppOffset = (partsuppSize + numMiniBatch - 1) / numMiniBatch
-  val customerOffset = (customerSize + numMiniBatch - 1) / numMiniBatch
-  val ordersOffset = (ordersSize + numMiniBatch - 1) / numMiniBatch
-  val nationOffset = 25
-  val regionOffset = 5
+  def lineitemOffset: Int = (lineitemSize + numMiniBatch - 1) / numMiniBatch
+  def supplierOffset: Int = (supplierSize + numMiniBatch - 1) / numMiniBatch
+  def partOffset: Int = (partSize + numMiniBatch - 1) / numMiniBatch
+  def partsuppOffset: Int = (partsuppSize + numMiniBatch - 1) / numMiniBatch
+  def customerOffset: Int = (customerSize + numMiniBatch - 1) / numMiniBatch
+  def ordersOffset: Int = (ordersSize + numMiniBatch - 1) / numMiniBatch
+  def nationOffset: Int = 25
+  def regionOffset: Int = 5
 
   def GetMetaData(tableName: String) : Option[Tuple4[StructType, String, String, Long]] =
   {
@@ -158,6 +158,11 @@ object TPCHSchema {
         printf("Unrecoganized Table %s\n", tableName)
         throw new Exception("Unrecoganized Table")
     }
+  }
+
+  def setMetaData(numBatch: Int, SF: Int): Unit = {
+    numMiniBatch = numBatch
+    scaleFactor = SF
   }
 
 }

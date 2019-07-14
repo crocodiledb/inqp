@@ -28,6 +28,8 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{EventTimeWatermark, LogicalPlan}
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.QueryExecution
+import org.apache.spark.sql.execution.SlothMetricsTracker
+import org.apache.spark.sql.execution.SlothProgressMetrics
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2ScanExec
 import org.apache.spark.sql.sources.v2.reader.streaming.MicroBatchReader
 import org.apache.spark.sql.streaming._
@@ -182,6 +184,24 @@ trait ProgressReporter extends Logging {
       sources = sourceProgress.toArray,
       sink = sinkProgress)
 
+    // Print out SlothDB Progress to console
+
+    if (hasNewData) {
+
+      val slothProgress = new SlothDBProgress(
+      id = id,
+      runId = runId,
+      name = name,
+      timestamp = formatTimestamp(currentTriggerStartTimestamp),
+      batchId = currentBatchId,
+      processTime = processingTimeSec,
+      operatorProgress = slothExtractOperatorMetrics().toArray,
+      sources = sourceProgress.toArray,
+      sink = sinkProgress)
+
+      printf(slothProgress.toString)
+    }
+
     if (hasNewData) {
       // Reset noDataEventTimestamp if we processed any data
       lastNoDataProgressEventTime = Long.MinValue
@@ -195,6 +215,16 @@ trait ProgressReporter extends Logging {
     }
 
     currentStatus = currentStatus.copy(isTriggerActive = false)
+  }
+
+  private def slothExtractOperatorMetrics(): Seq[SlothProgressMetrics] = {
+    if (lastExecution == null) return Nil
+    // lastExecution could belong to one of the previous triggers if `!hasNewData`.
+    // Walking the plan again should be inexpensive.
+    lastExecution.executedPlan.collect {
+      case p if p.isInstanceOf[SlothMetricsTracker] =>
+        p.asInstanceOf[SlothMetricsTracker].getProgress()
+    }
   }
 
   /** Extract statistics about stateful operators from the executed query plan. */

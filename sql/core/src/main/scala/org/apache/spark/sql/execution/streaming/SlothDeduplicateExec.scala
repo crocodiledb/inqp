@@ -25,6 +25,7 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.internal.SessionState
 import org.apache.spark.util.CompletionIterator
@@ -34,7 +35,7 @@ case class SlothDeduplicateExec(keyExpressions: Seq[Attribute],
                                 child: SparkPlan,
                                 stateInfo: Option[StatefulOperatorStateInfo] = None,
                                 eventTimeWatermark: Option[Long] = None)
-  extends UnaryExecNode with StateStoreWriter with WatermarkSupport {
+  extends UnaryExecNode with WatermarkSupport with SlothMetricsTracker {
 
   private val storeConf = new StateStoreConf(sqlContext.conf)
   private val hadoopConfBcast = sparkContext.broadcast(
@@ -44,6 +45,13 @@ case class SlothDeduplicateExec(keyExpressions: Seq[Attribute],
   /** Distribute by grouping attributes */
   override def requiredChildDistribution: Seq[Distribution] =
     ClusteredDistribution(keyExpressions, stateInfo.map(_.numPartitions)) :: Nil
+
+  override lazy val metrics = Map(
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "aggTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "aggregate time"),
+    "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"),
+    "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory")
+  )
 
   override protected def doExecute(): RDD[InternalRow] = {
     metrics // force lazy init at driver
@@ -55,10 +63,9 @@ case class SlothDeduplicateExec(keyExpressions: Seq[Attribute],
         hadoopConfBcast.value.value)
 
       val getKey = GenerateUnsafeProjection.generate(keyExpressions, child.output)
+
       val numOutputRows = longMetric("numOutputRows")
-      val numUpdatedStateRows = longMetric("numUpdatedStateRows")
-      val allUpdatesTimeMs = longMetric("allUpdatesTimeMs")
-      val allRemovalsTimeMs = longMetric("allRemovalsTimeMs")
+      val aggTimeMs = longMetric("commitTimeMs")
       val commitTimeMs = longMetric("commitTimeMs")
 
       val baseIterator = watermarkPredicateForData match {
@@ -66,14 +73,13 @@ case class SlothDeduplicateExec(keyExpressions: Seq[Attribute],
         case None => iter
       }
 
-      val updatesStartTimeNs = System.nanoTime
+      val startUpdateTimeNs = System.nanoTime
 
       baseIterator.foreach(r => {
         val row = r.asInstanceOf[UnsafeRow]
         val key = getKey(row)
         if (row.isInsert) dedupStateManager.insert(key)
         else dedupStateManager.delete(key)
-        numUpdatedStateRows += 1
       })
 
       val result = dedupStateManager.distinctIterAndWriteStore()
@@ -82,12 +88,9 @@ case class SlothDeduplicateExec(keyExpressions: Seq[Attribute],
           key
         })
 
-      // TODO: understand telemetry management
       CompletionIterator[InternalRow, Iterator[InternalRow]](result, {
-        allUpdatesTimeMs += NANOSECONDS.toMillis(System.nanoTime - updatesStartTimeNs)
-        // allRemovalsTimeMs += timeTakenMs { dedupStateManager }
+        aggTimeMs += NANOSECONDS.toMillis(System.nanoTime - startUpdateTimeNs)
         commitTimeMs += timeTakenMs { dedupStateManager.commit() }
-        // setStoreMetrics(store)
       })
     })
   }
@@ -95,8 +98,4 @@ case class SlothDeduplicateExec(keyExpressions: Seq[Attribute],
   override def output: Seq[Attribute] = child.output
 
   override def outputPartitioning: Partitioning = child.outputPartitioning
-
-  override def shouldRunAnotherBatch(newMetadata: OffsetSeqMetadata): Boolean = {
-    eventTimeWatermark.isDefined && newMetadata.batchWatermarkMs > eventTimeWatermark.get
-  }
 }

@@ -30,6 +30,7 @@ import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.sql.execution.SlothProgressMetrics
 
 /**
  * Information about updates made to stateful operators in a [[StreamingQuery]] during a trigger.
@@ -148,6 +149,52 @@ class StreamingQueryProgress private[sql](
     ("eventTime" -> safeMapToJValue[String](eventTime, s => JString(s))) ~
     ("stateOperators" -> JArray(stateOperators.map(_.jsonValue).toList)) ~
     ("sources" -> JArray(sources.map(_.jsonValue).toList)) ~
+    ("sink" -> sink.jsonValue)
+  }
+}
+
+class SlothDBProgress private[sql] (
+      val id: UUID,
+      val runId: UUID,
+      val name: String,
+      val timestamp: String,
+      val batchId: Long,
+      val processTime: Double,
+      val operatorProgress: Array[SlothProgressMetrics],
+      val sources: Array[SourceProgress],
+      val sink: SinkProgress) {
+
+  def numInputRows: Long = sources.map(_.numInputRows).sum
+  def inputRowsPerSecond: Double = sources.map(_.inputRowsPerSecond).sum
+  def processedRowsPerSecond: Double = sources.map(_.processedRowsPerSecond).sum
+  def json: String = compact(render(jsonValue))
+  def prettyJson: String = pretty(render(jsonValue))
+
+  override def toString: String = prettyJson
+
+  private[sql] def jsonValue: JValue = {
+    def safeDoubleToJValue(value: Double): JValue = {
+      if (value.isNaN || value.isInfinity) JNothing else JDouble(value)
+    }
+
+    /** Convert map to JValue while handling empty maps. Also, this sorts the keys. */
+    def safeMapToJValue[T](map: ju.Map[String, T], valueToJValue: T => JValue): JValue = {
+      if (map.isEmpty) return JNothing
+      val keys = map.asScala.keySet.toSeq.sorted
+      keys.map { k => k -> valueToJValue(map.get(k)) : JObject }.reduce(_ ~ _)
+    }
+
+    ("id" -> JString(id.toString)) ~
+    ("runId" -> JString(runId.toString)) ~
+    ("name" -> JString(name)) ~
+    ("timestamp" -> JString(timestamp)) ~
+    ("batchId" -> JInt(batchId)) ~
+    ("numInputRows" -> JInt(numInputRows)) ~
+    ("ProcessTime" -> safeDoubleToJValue(processTime)) ~
+    ("inputRowsPerSecond" -> safeDoubleToJValue(inputRowsPerSecond)) ~
+    ("processedRowsPerSecond" -> safeDoubleToJValue(processedRowsPerSecond)) ~
+    // ("operatorProgress" -> JArray(operatorProgress.map(_.jsonValue).toList)) ~
+    // ("sources" -> JArray(sources.map(_.jsonValue).toList)) ~
     ("sink" -> sink.jsonValue)
   }
 }

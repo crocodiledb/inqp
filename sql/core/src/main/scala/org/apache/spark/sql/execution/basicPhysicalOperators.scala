@@ -86,9 +86,9 @@ case class ProjectExec(projectList: Seq[NamedExpression], child: SparkPlan)
 }
 
 
-/** Physical plan for Filter. */
+/** Physical plan for Filter. SlothDB: Added MetricsTracker */
 case class FilterExec(condition: Expression, child: SparkPlan)
-  extends UnaryExecNode with CodegenSupport with PredicateHelper {
+  extends UnaryExecNode with CodegenSupport with PredicateHelper with SlothMetricsTracker {
 
   // Split out all the IsNotNulls from condition.
   private val (notNullPreds, otherPreds) = splitConjunctivePredicates(condition).partition {

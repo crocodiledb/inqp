@@ -39,7 +39,7 @@ case class SortExec(
     global: Boolean,
     child: SparkPlan,
     testSpillFrequency: Int = 0)
-  extends UnaryExecNode with CodegenSupport {
+  extends UnaryExecNode with CodegenSupport with SlothMetricsTracker {
 
   override def output: Seq[Attribute] = child.output
 
