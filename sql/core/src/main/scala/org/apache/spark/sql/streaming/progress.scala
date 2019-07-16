@@ -160,6 +160,7 @@ class SlothDBProgress private[sql] (
       val timestamp: String,
       val batchId: Long,
       val processTime: Double,
+      val totalProcessTime: Double,
       val operatorProgress: Array[SlothProgressMetrics],
       val sources: Array[SourceProgress],
       val sink: SinkProgress) {
@@ -193,6 +194,7 @@ class SlothDBProgress private[sql] (
     ("ProcessTime" -> safeDoubleToJValue(processTime)) ~
     ("inputRowsPerSecond" -> safeDoubleToJValue(inputRowsPerSecond)) ~
     ("processedRowsPerSecond" -> safeDoubleToJValue(processedRowsPerSecond)) ~
+    ("totalProcessTime" -> safeDoubleToJValue(totalProcessTime)) ~
     // ("operatorProgress" -> JArray(operatorProgress.map(_.jsonValue).toList)) ~
     // ("sources" -> JArray(sources.map(_.jsonValue).toList)) ~
     ("sink" -> sink.jsonValue)

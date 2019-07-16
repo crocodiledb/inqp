@@ -18,17 +18,25 @@
 // scalastyle:off println
 package totem.middleground.tpch
 
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.internal.SQLConf
 
-class QueryTPCH (bootstrap: String, query: String, numBatch: Int, SF: Int)
+class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
+                 shuffleNum: String, statDIR: String, SF: Double, checkpoint: String)
 {
 
   DataUtils.bootstrap = bootstrap
-  TPCHSchema.setMetaData(numBatch, SF)
+  TPCHSchema.setQueryMetaData(numBatch, SF, checkpoint)
 
   def execQuery(query: String): Unit = {
+    val sparkConf = new SparkConf()
+      .set(SQLConf.SHUFFLE_PARTITIONS.key, shuffleNum)
+      .set(SQLConf.SLOTHDB_STAT_DIR.key, statDIR)
+
     val spark = SparkSession.builder()
+      .config(sparkConf)
       .appName("Executing Query " + query)
       .getOrCreate()
 
@@ -85,6 +93,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int, SF: Int)
   def execQ1(spark: SparkSession): Unit = {
     import spark.implicits._
 
+    val sum_qty = new DoubleSum
     val sum_base_price = new DoubleSum
     val sum_disc_price = new Sum_disc_price
     val sum_charge = new Sum_disc_price_with_tax
@@ -100,7 +109,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int, SF: Int)
         $"l_quantity", $"l_extendedprice", $"l_discount", $"l_tax")
       .groupBy($"l_returnflag", $"l_linestatus")
       .agg(
-        max($"l_quantity").as("max_qty"),
+        sum_qty($"l_quantity").as("sum_qty"),
         sum_base_price($"l_extendedprice" * $"l_discount").as("sum_base_price"),
         sum_disc_price($"l_extendedprice", $"l_discount").as("sum_disc_price"),
         sum_charge($"l_extendedprice", $"l_discount", $"l_tax").as("sum_charge"),
@@ -109,7 +118,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int, SF: Int)
         avg_disc($"l_discount").as("avg_disc"),
         count_order(lit(1L)).as("count_order")
       )
-      .orderBy($"l_returnflag", $"l_linestatus")
+      // .orderBy($"l_returnflag", $"l_linestatus")
 
     // result.explain(true)
 
@@ -751,12 +760,14 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int, SF: Int)
 object QueryTPCH {
   def main(args: Array[String]): Unit = {
 
-    if (args.length < 4) {
-      System.err.println("Usage: QueryTPCH <bootstrap-servers> <query> <numBatch> <SF>")
+    if (args.length < 7) {
+      System.err.println("Usage: QueryTPCH <bootstrap-servers> <query>" +
+        "<numBatch> <number-shuffle-partition> <statistics dir> <SF> <Checkpoint>")
       System.exit(1)
     }
 
-    val tpch = new QueryTPCH(args(0), args(1), args(2).toInt, args(3).toInt)
+    val tpch = new QueryTPCH(args(0), args(1), args(2).toInt,
+      args(3), args(4), args(5).toDouble, args(6))
     tpch.execQuery(args(1))
   }
 }

@@ -150,6 +150,11 @@ object SQLConf {
     }
   }
 
+  val SLOTHDB_STAT_DIR = buildConf("spark.sql.slothdb.stat.dir")
+    .doc("A directory for statistics of SlothDB")
+    .stringConf
+    .createOptional
+
   val OPTIMIZER_EXCLUDED_RULES = buildConf("spark.sql.optimizer.excludedRules")
     .doc("Configures a list of rules to be disabled in the optimizer, in which the rules are " +
       "specified by their rule names and separated by comma. It is not guaranteed that all the " +

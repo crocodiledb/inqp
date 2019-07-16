@@ -22,7 +22,7 @@ import java.util.Optional
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{Map => MutableMap}
 
-import org.apache.spark.sql.{Dataset, SparkSession}
+import org.apache.spark.sql.{Dataset, SlothDBContext, SparkSession}
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.catalyst.expressions.{Alias, CurrentBatchTimestamp, CurrentDate, CurrentTimestamp}
 import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, Project}
@@ -213,6 +213,11 @@ class MicroBatchExecution(
           currentBatchId += 1
           isCurrentBatchConstructed = false
         } else Thread.sleep(pollingDelayMs)
+
+        if (!currentBatchHasNewData && SlothDBContext.enable_slothdb) {
+          slothDBWriteStats()
+          stop()
+        }
       }
       updateStatusMessage("Waiting for next trigger")
       isActive

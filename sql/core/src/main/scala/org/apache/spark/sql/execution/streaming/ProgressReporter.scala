@@ -17,8 +17,9 @@
 
 package org.apache.spark.sql.execution.streaming
 
+import java.io.{File, IOException, PrintWriter}
 import java.text.SimpleDateFormat
-import java.util.{Date, UUID}
+import java.util.{Date, NoSuchElementException, UUID}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -31,6 +32,7 @@ import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.execution.SlothMetricsTracker
 import org.apache.spark.sql.execution.SlothProgressMetrics
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2ScanExec
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.v2.reader.streaming.MicroBatchReader
 import org.apache.spark.sql.streaming._
 import org.apache.spark.sql.streaming.StreamingQueryListener.QueryProgressEvent
@@ -65,6 +67,8 @@ trait ProgressReporter extends Logging {
   protected def sparkSession: SparkSession
   protected def postEvent(event: StreamingQueryListener.Event): Unit
 
+  protected def slothdbStatDir: String
+
   // Local timestamps and counters.
   private var currentTriggerStartTimestamp = -1L
   private var currentTriggerEndTimestamp = -1L
@@ -72,6 +76,8 @@ trait ProgressReporter extends Logging {
   private var currentTriggerEndOffsets: Map[BaseStreamingSource, String] = _
   // TODO: Restore this from the checkpoint when possible.
   private var lastTriggerStartTimestamp = -1L
+
+  private var totalTimeSec = 0.0
 
   private val currentDurationsMs = new mutable.HashMap[String, Long]()
 
@@ -142,6 +148,24 @@ trait ProgressReporter extends Logging {
     logInfo(s"Streaming query made progress: $newProgress")
   }
 
+  protected def slothDBWriteStats(): Unit = {
+    var statFile: String = null
+    try {
+      val dir = slothdbStatDir
+      statFile = dir + "/slothdb.stat"
+      val shuffleNum = sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key)
+      val pw = new PrintWriter(new File(statFile))
+      pw.print(f"${currentBatchId}\t${shuffleNum}\t${totalTimeSec}%.2f\n")
+      pw.close
+    }
+    catch {
+      case e: NoSuchElementException =>
+        logInfo("SlothDB Stats Dir is not set")
+      case e: IOException =>
+        logError(s"Writing ${statFile} error")
+    }
+  }
+
   /** Finalizes the query progress and adds it to list of recent status updates. */
   protected def finishTrigger(hasNewData: Boolean): Unit = {
     assert(currentTriggerStartOffsets != null && currentTriggerEndOffsets != null)
@@ -188,6 +212,8 @@ trait ProgressReporter extends Logging {
 
     if (hasNewData) {
 
+      totalTimeSec += processingTimeSec
+
       val slothProgress = new SlothDBProgress(
       id = id,
       runId = runId,
@@ -195,6 +221,7 @@ trait ProgressReporter extends Logging {
       timestamp = formatTimestamp(currentTriggerStartTimestamp),
       batchId = currentBatchId,
       processTime = processingTimeSec,
+      totalProcessTime = totalTimeSec,
       operatorProgress = slothExtractOperatorMetrics().toArray,
       sources = sourceProgress.toArray,
       sink = sinkProgress)

@@ -21,7 +21,10 @@ package totem.middleground.tpch
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.StructType
 
-class LoadTPCH (bootstrap: String) {
+class LoadTPCH (bootstrap: String, data_root_dir: String, checkpoint: String) {
+
+  TPCHSchema.datadir = data_root_dir
+  TPCHSchema.checkpointLocation = checkpoint
 
   def loadOneTable(tableName: String, schema: StructType, path: String, topics: String): Unit =
   {
@@ -67,12 +70,12 @@ class WritingThread(streamLoader: LoadTPCH, tableName: String) extends Thread {
 object LoadTPCH {
 
   def main(args: Array[String]): Unit = {
-    if (args.length < 1) {
-      System.err.println("Usage: LoadTPCH <bootstrap-servers>")
+    if (args.length < 3) {
+      System.err.println("Usage: LoadTPCH <bootstrap-servers> <data-root-dir> <checkpoint>")
       System.exit(1)
     }
 
-    val loader = new LoadTPCH(args(0))
+    val loader = new LoadTPCH(args(0), args(1), args(2))
 
     val loadTables = List("Part", "PartSupp", "Supplier", "Customer",
                           "Orders", "Lineitem", "Nation", "Region")

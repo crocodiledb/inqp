@@ -29,7 +29,7 @@ object TPCHSchema {
   val nationTopics = "Nation"
   val regionTopics = "Region"
 
-  val checkpointLocation = "hdfs://localhost:9000/tpch_checkpoint"
+  var checkpointLocation = "hdfs://localhost:9000/tpch_checkpoint"
 
   val supplierSchema = new StructType().add("s_suppkey", "long")
     .add("s_name", "string")
@@ -100,29 +100,28 @@ object TPCHSchema {
     .add("r_name", "string")
     .add("r_comment", "string")
 
-  val slothdb_testroot = "/home/totemtang/slothdb/slothdb_testsuite"
-  val datadir = slothdb_testroot + "/datadir/tpchdata"
-  val supplierPath = datadir + "/supplier"
-  val partPath = datadir + "/part"
-  val partsuppPath = datadir + "/partsupp"
-  val customerPath = datadir + "/customer"
-  val ordersPath = datadir + "/orders"
-  val lineitemPath = datadir + "/lineitem"
-  val nationPath = datadir  + "/nation"
-  val regionPath = datadir + "/region"
+  var datadir = "/home/totemtang/slothdb/slothdb_testsuite/datadir/tpchdata"
+  private def supplierPath = datadir + "/supplier"
+  private def partPath = datadir + "/part"
+  private def partsuppPath = datadir + "/partsupp"
+  private def customerPath = datadir + "/customer"
+  private def ordersPath = datadir + "/orders"
+  private def lineitemPath = datadir + "/lineitem"
+  private def nationPath = datadir  + "/nation"
+  private def regionPath = datadir + "/region"
 
   // val nationPath = "hdfs://localhost:9000/tpch_data/nation.tbl"
   // val regionPath = "hdfs://localhost:9000/tpch_data/region.tbl"
 
   var numMiniBatch = 4
-  var scaleFactor = 1
+  var scaleFactor = 1.0
 
-  def lineitemSize: Int = 601000 * scaleFactor
-  def ordersSize: Int = 150000 * scaleFactor
-  def customerSize: Int = 15000 * scaleFactor
-  def partSize: Int = 20000 * scaleFactor
-  def partsuppSize: Int = 80000 * scaleFactor
-  def supplierSize: Int = 1000 * scaleFactor
+  def lineitemSize: Int = (6010000 * scaleFactor).toInt
+  def ordersSize: Int = (1500000 * scaleFactor).toInt
+  def customerSize: Int = (150000 * scaleFactor).toInt
+  def partSize: Int = (200000 * scaleFactor).toInt
+  def partsuppSize: Int = (800000 * scaleFactor).toInt
+  def supplierSize: Int = (10000 * scaleFactor).toInt
   def nationSize: Int = 25
   def regionSize: Int = 5
 
@@ -160,9 +159,10 @@ object TPCHSchema {
     }
   }
 
-  def setMetaData(numBatch: Int, SF: Int): Unit = {
+  def setQueryMetaData(numBatch: Int, SF: Double, checkpoint: String): Unit = {
     numMiniBatch = numBatch
     scaleFactor = SF
+    checkpointLocation = checkpoint
   }
 
 }
