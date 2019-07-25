@@ -27,12 +27,16 @@ import org.apache.spark.sql.functions._
 class AggregateTest (bootstrap: String, query: String) {
     DataUtils.bootstrap = bootstrap
 
+  var query_name: String = null
+
   def execQuery(query: String): Unit = {
     val spark = SparkSession.builder()
       .appName("Executing Query " + query)
       .getOrCreate()
 
-    query.toLowerCase match {
+    query_name = query.toLowerCase
+
+    query_name match {
       case "q_singleagg" =>
         execSingleAgg(spark)
       case "q_complexagg" =>
@@ -62,7 +66,7 @@ class AggregateTest (bootstrap: String, query: String) {
       .dropDuplicates()
 
     result.explain()
-    // DataUtils.writeToSink(result)
+    // DataUtils.writeToSink(result, query_name)
   }
 
   // Two cascading aggregation with predicates
@@ -90,7 +94,7 @@ class AggregateTest (bootstrap: String, query: String) {
         max($"sum_disc_price").as("final_sum_disc_price")
       )
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 }
 

@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.execution
 
+import java.util.UUID
+
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.Duration
 
@@ -27,8 +29,9 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.execution.streaming.{SlothRuntime, SlothRuntimeCache, SlothRuntimeOpId, StatefulOperatorStateInfo}
 import org.apache.spark.sql.types.LongType
-import org.apache.spark.util.ThreadUtils
+import org.apache.spark.util.{CompletionIterator, ThreadUtils}
 import org.apache.spark.util.random.{BernoulliCellSampler, PoissonSampler}
 
 /** Physical plan for Project. */
@@ -85,6 +88,58 @@ case class ProjectExec(projectList: Seq[NamedExpression], child: SparkPlan)
   override def outputPartitioning: Partitioning = child.outputPartitioning
 }
 
+case class SlothProjectExec(projectList: Seq[NamedExpression],
+                            child: SparkPlan)
+  extends UnaryExecNode {
+
+  override def output: Seq[Attribute] = projectList.map(_.toAttribute)
+
+  private var opId: Long = _
+  private var queryId: UUID = _
+
+  def setID(operatorId: Long, queryRunId: UUID): Unit = {
+    this.opId = operatorId
+    this.queryId = queryRunId
+  }
+
+  protected override def doExecute(): RDD[InternalRow] = {
+
+    child.execute().mapPartitionsWithIndexInternal { (index, iter) =>
+
+      val opRtID = new SlothRuntimeOpId(opId, queryId)
+
+      var projRt =
+        if (opId == -1) null
+        else SlothRuntimeCache.get(opRtID)
+      if (projRt == null) {
+        projRt = new SlothProjectRuntime(
+          UnsafeProjection
+            .create(projectList, child.output, subexpressionEliminationEnabled))
+      }
+      val project = projRt.asInstanceOf[SlothProjectRuntime].outputProj
+
+      project.initialize(index)
+      val projIter = iter.map{ inputRow =>
+        val projRow = project(inputRow)
+        projRow.setInsert(inputRow.isInsert)
+        projRow.setUpdate(inputRow.isUpdate)
+        projRow
+      }
+
+      def onCompletion: Unit =
+        if (opId != -1) SlothRuntimeCache.put(opRtID, projRt)
+
+      CompletionIterator[InternalRow, Iterator[InternalRow]](
+       projIter, onCompletion)
+    }
+  }
+
+  override def outputOrdering: Seq[SortOrder] = child.outputOrdering
+
+  override def outputPartitioning: Partitioning = child.outputPartitioning
+}
+
+case class SlothProjectRuntime(outputProj: UnsafeProjection) extends SlothRuntime
 
 /** Physical plan for Filter. SlothDB: Added MetricsTracker */
 case class FilterExec(condition: Expression, child: SparkPlan)
@@ -217,6 +272,7 @@ case class FilterExec(condition: Expression, child: SparkPlan)
     val numOutputRows = longMetric("numOutputRows")
     child.execute().mapPartitionsWithIndexInternal { (index, iter) =>
       val predicate = newPredicate(condition, child.output)
+
       predicate.initialize(0)
 
       var deleteRow: UnsafeRow = null

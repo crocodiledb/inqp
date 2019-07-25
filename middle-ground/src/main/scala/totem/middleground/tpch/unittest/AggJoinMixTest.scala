@@ -26,12 +26,15 @@ import org.apache.spark.sql.SparkSession
 class AggJoinMixTest (bootstrap: String, query: String) {
   DataUtils.bootstrap = bootstrap
 
+  private var query_name: String = null
+
   def execQuery(query: String): Unit = {
     val spark = SparkSession.builder()
       .appName("Executing Query " + query)
       .getOrCreate()
 
-    query.toLowerCase match {
+    query_name = query.toLowerCase
+    query_name match {
       case "q17" =>
         execQ17(spark)
       case _ =>
@@ -59,7 +62,7 @@ class AggJoinMixTest (bootstrap: String, query: String) {
         $"l_quantity" < $"avg_quantity")
       .agg((sumExtendedprice($"l_extendedprice") / 7.0).as("avg_yearly"))
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 }
 

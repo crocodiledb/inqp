@@ -632,7 +632,11 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
       case logical.Sort(sortExprs, global, child) =>
         execution.SortExec(sortExprs, global, planLater(child)) :: Nil
       case logical.Project(projectList, child) =>
-        execution.ProjectExec(projectList, planLater(child)) :: Nil
+        if (SlothDBContext.enable_slothdb) {
+         execution.SlothProjectExec(projectList, planLater(child)) :: Nil
+        } else {
+          execution.ProjectExec(projectList, planLater(child)) :: Nil
+        }
       case logical.Filter(condition, child) =>
         execution.FilterExec(condition, planLater(child)) :: Nil
       case f: logical.TypedFilter =>

@@ -32,9 +32,9 @@ import org.apache.spark.sql.types._
 class SlothAggFullMap(
     groupExpressions: Seq[NamedExpression],
     inputAttributes: Seq[Attribute],
-    stateInfo: Option[StatefulOperatorStateInfo],
-    storeConf: StateStoreConf,
-    hadoopConf: Configuration,
+    var stateInfo: Option[StatefulOperatorStateInfo],
+    var storeConf: StateStoreConf,
+    var hadoopConf: Configuration,
     watermarkForData: Option[Predicate]) extends Logging {
 
   private val keySchema = StructType(groupExpressions.zipWithIndex.map {
@@ -45,7 +45,7 @@ class SlothAggFullMap(
   private val keyWithIndexExprs = keyAttributes :+ Literal(1L)
 
   private val keyWithIndexRowGenerator = UnsafeProjection.create(keyWithIndexExprs, keyAttributes)
-  private val indexOrdinalInKeyWithIndexRow = keyAttributes.size
+  private val indexOrdinal = keyAttributes.size
   private val keyWithoutIndexGenerator = UnsafeProjection
     .create(groupExpressions, inputAttributes)
 
@@ -53,36 +53,51 @@ class SlothAggFullMap(
 
   private val storeName = "GroupKeywithIndexToFullDataStore"
 
-  private val stateStore = getStateStore(keyWithIndexSchema, valSchema)
+  private var stateStore = getStateStore(keyWithIndexSchema, valSchema)
+
+  def reInit(stateInfo: Option[StatefulOperatorStateInfo],
+             storeConf: StateStoreConf,
+             hadoopConf: Configuration): Unit = {
+    this.stateInfo = stateInfo
+    this.storeConf = storeConf
+    this.hadoopConf = hadoopConf
+    stateStore = getStateStore(keyWithIndexSchema, valSchema)
+  }
+
+  def purge(): Unit = {
+
+  }
 
   /** Generated a row using the key and index */
-  private def keyWithIndexRow(key: UnsafeRow, valueIndex: Long): UnsafeRow = {
+  private def keyWithMetaRow(key: UnsafeRow, valueIndex: Long): UnsafeRow = {
     val row = keyWithIndexRowGenerator(key)
-    row.setLong(indexOrdinalInKeyWithIndexRow, valueIndex)
+    row.setLong(indexOrdinal, valueIndex)
     row
   }
 
-  def put(groupKey: UnsafeRow, id: Long, row: UnsafeRow): Unit = {
-    stateStore.put(keyWithIndexRow(groupKey, id), row)
+  def put(groupKey: UnsafeRow, id: Long, isInsert: Boolean, row: UnsafeRow): Unit = {
+    row.setInsert(isInsert)
+    stateStore.put(keyWithMetaRow(groupKey, id), row)
+    row.cleanStates()
   }
 
-  def remove(groupKey: UnsafeRow, maxID: Long, oldRow: UnsafeRow): Unit = {
-    breakable(
-      for (id <- 0L to maxID) {
-        if (id == maxID) {
-          logError(s"Not found the row in fullmap")
-          break
-        }
+  // def remove(groupKey: UnsafeRow, maxID: Long, oldRow: UnsafeRow): Unit = {
+  //   breakable(
+  //     for (id <- 0L to maxID) {
+  //       if (id == maxID) {
+  //         logError(s"Not found the row in fullmap")
+  //         break
+  //       }
 
-        val tmpKey = keyWithIndexRow(groupKey, id)
-        val tmpRow = stateStore.get(tmpKey)
-        if (tmpRow != null && tmpRow.equals(oldRow)) {
-          stateStore.remove(tmpKey)
-          break
-        }
-      }
-    )
-  }
+  //       val tmpKey = keyWithIndexRow(groupKey, id)
+  //       val tmpRow = stateStore.get(tmpKey)
+  //       if (tmpRow != null && tmpRow.equals(oldRow)) {
+  //         stateStore.remove(tmpKey)
+  //         break
+  //       }
+  //     }
+  //   )
+  // }
 
   def getNumKeys: Long = {
     stateStore.metrics.numKeys
@@ -192,23 +207,63 @@ class SlothAggFullMap(
       result
     }: Int
 
+    val insertCompFunc = (rowA: UnsafeRow, rowB: UnsafeRow) => {
+      val isInsertA = rowA.isInsert
+      val isInsertB = rowB.isInsert
+
+      // Delete comes first
+      if (!isInsertA && isInsertB) true
+      else false
+    }: Boolean
+
+    // -1 less than
+    // 0 equal
+    // 1 larger than
     val compRowFunc = dataType match {
       case DoubleType =>
-        (rowA: UnsafeRow, rowB: UnsafeRow) =>
-          {rowA.getDouble(rowOffset) < rowB.getDouble(rowOffset)}: Boolean
+        (rowA: UnsafeRow, rowB: UnsafeRow) => {
+          val valueA = rowA.getDouble(rowOffset)
+          val valueB = rowB.getDouble(rowOffset)
+          if (valueA < valueB) -1
+          else if (valueA == valueB) 0
+          else 1
+        }: Int
       case IntegerType =>
-        (rowA: UnsafeRow, rowB: UnsafeRow) =>
-          {rowA.getInt(rowOffset) < rowB.getInt(rowOffset)}: Boolean
+         (rowA: UnsafeRow, rowB: UnsafeRow) => {
+          val valueA = rowA.getInt(rowOffset)
+          val valueB = rowB.getInt(rowOffset)
+          if (valueA < valueB) -1
+          else if (valueA == valueB) 0
+          else 1
+        }: Int
       case LongType =>
-        (rowA: UnsafeRow, rowB: UnsafeRow) =>
-          {rowA.getLong(rowOffset) < rowB.getLong(rowOffset)}: Boolean
+        (rowA: UnsafeRow, rowB: UnsafeRow) => {
+          val valueA = rowA.getLong(rowOffset)
+          val valueB = rowB.getLong(rowOffset)
+          if (valueA < valueB) -1
+          else if (valueA == valueB) 0
+          else 1
+        }: Int
       case _ =>
         throw new IllegalArgumentException(s"Not supported ${dataType}")
     }
 
     val wrapCompRowFunc = aggFunc match {
-      case _: Max => (rowA: UnsafeRow, rowB: UnsafeRow) => !compRowFunc(rowA, rowB)
-      case _ => compRowFunc
+      case _: Min =>
+        (rowA: UnsafeRow, rowB: UnsafeRow) => {
+          val rowResult = compRowFunc(rowA, rowB)
+          if (rowResult == -1) true
+          else if (rowResult == 0) insertCompFunc(rowA, rowB)
+          else false
+        }
+      // Max
+      case _ =>
+        (rowA: UnsafeRow, rowB: UnsafeRow) => {
+          val rowResult = compRowFunc(rowA, rowB)
+          if (rowResult == -1) false
+          else if (rowResult == 0) insertCompFunc(rowA, rowB)
+          else true
+        }
     }
 
     val sortFunc = (pairA: UnsafeRowPair, pairB: UnsafeRowPair) => {
@@ -234,7 +289,22 @@ class SlothAggFullMap(
         hashMapforMetaData.getHasChange(groupKey, exprIndex)
       })
       .toSeq
-    new SortedIterator(pairSeq.sortWith(sortFunc), eqGroupFunc)
+
+    var deleteCounter = 0
+    val sortedWithoutDeletes = pairSeq.sortWith(sortFunc)
+      .filter(pair => {
+        val key = pair.key
+        val value = pair.value
+        if (value.isInsert && deleteCounter == 0) true
+        else {
+          stateStore.remove(key)
+          if (value.isInsert) deleteCounter -= 1
+          else deleteCounter += 1
+          false
+        }
+      })
+
+    new SortedIterator(sortedWithoutDeletes, eqGroupFunc)
   }
 
   private class SortedIterator (sortedSeq: Seq[UnsafeRowPair],

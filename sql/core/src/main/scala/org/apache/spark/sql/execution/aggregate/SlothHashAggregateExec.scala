@@ -99,30 +99,29 @@ case class SlothHashAggregateExec (
     child.execute().mapPartitionsWithIndex { (partIndex, iter) =>
       val numOutputRows = longMetric("numOutputRows")
       val aggTimeMs = longMetric("aggTimeMs")
-      val commitTimeMs = longMetric("commitTimeMs")
       val stateMemory = longMetric("stateMemory")
 
       val beforeAgg = System.nanoTime()
       val resIter =
         new SlothAggregationIterator(
-            partIndex,
-            groupingExpressions,
-            aggregateExpressions,
-            aggregateAttributes,
-            resultExpressions,
-            (expressions, inputSchema) =>
-              newMutableProjection(expressions, inputSchema, subexpressionEliminationEnabled),
-            child.output,
-            iter,
-            numOutputRows,
-            stateMemory,
-            stateInfo,
-            storeConf,
-            hadoopConfBcast.value.value,
-            watermarkPredicateForKeys,
-            watermarkPredicateForData,
-            deltaOutput,
-            updateOutput)
+          partIndex,
+          groupingExpressions,
+          aggregateExpressions,
+          aggregateAttributes,
+          resultExpressions,
+          (expressions, inputSchema) =>
+            newMutableProjection(expressions, inputSchema, subexpressionEliminationEnabled),
+          child.output,
+          iter,
+          numOutputRows,
+          stateMemory,
+          stateInfo,
+          storeConf,
+          hadoopConfBcast.value.value,
+          watermarkPredicateForKeys,
+          watermarkPredicateForData,
+          deltaOutput,
+          updateOutput)
       aggIter = resIter
       aggTimeMs += (System.nanoTime() - beforeAgg) / 1000000
       CompletionIterator[InternalRow, Iterator[InternalRow]](resIter, onCompletion)

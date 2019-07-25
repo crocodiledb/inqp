@@ -26,8 +26,8 @@ import org.apache.spark.sql.catalyst.expressions.{CurrentBatchTimestamp, Express
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, HashPartitioning, SinglePartition}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.execution.{QueryExecution, SparkPlan, SparkPlanner, UnaryExecNode}
-import org.apache.spark.sql.execution.aggregate.SlothHashAggregateExec
+import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.aggregate.{SlothFinalAggExec, SlothHashAggregateExec}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.streaming.OutputMode

@@ -27,7 +27,7 @@ import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.expressions.codegen.{GenerateUnsafeRowJoiner, Predicate}
 import org.apache.spark.sql.execution.SlothAggResultMap
 import org.apache.spark.sql.execution.metric.SQLMetric
-import org.apache.spark.sql.execution.streaming.StatefulOperatorStateInfo
+import org.apache.spark.sql.execution.streaming.{SlothRuntime, SlothRuntimeCache, SlothRuntimeOpId, StatefulOperatorStateInfo}
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.KVIterator
@@ -51,6 +51,12 @@ class SlothAggregationIterator (
     deltaOutput: Boolean,
     updateOuput: Boolean)
 extends Iterator[InternalRow] with Logging {
+
+  private val opRtId = new SlothRuntimeOpId(stateInfo.get.operatorId, stateInfo.get.queryRunId)
+  private val retRT = SlothRuntimeCache.get(opRtId)
+  private var aggRT =
+    if (retRT != null) retRT.asInstanceOf[SlothAggIterRuntime]
+    else null
 
   // Initialize all AggregateFunctions by binding references if necessary,
   // and mutableBufferOffset.
@@ -91,7 +97,8 @@ extends Iterator[InternalRow] with Logging {
   }
 
   private val groupingProjection: UnsafeProjection =
-    UnsafeProjection.create(groupingExpressions, originalInputAttributes)
+    if (aggRT != null) aggRT.groupingProjection
+    else UnsafeProjection.create(groupingExpressions, originalInputAttributes)
 
   private def createNewAggregationBuffer(): UnsafeRow = {
     val bufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
@@ -104,16 +111,25 @@ extends Iterator[InternalRow] with Logging {
     buffer
   }
 
-  private[this] val initialAggregationBuffer: UnsafeRow = createNewAggregationBuffer()
+  private[this] val initialAggregationBuffer: UnsafeRow =
+    if (aggRT != null) aggRT.initialAggregationBuffer
+    else createNewAggregationBuffer()
 
-  private[this] val hashMapforResult = new SlothAggResultMap(
+  private[this] val hashMapforResult = if (aggRT != null) {
+    aggRT.hashMapforResult.reInit(
+      TaskContext.get(),
+      1024*16,
+      TaskContext.get().taskMemoryManager().pageSizeBytes())
+    aggRT.hashMapforResult
+  } else {
+    new SlothAggResultMap (
     initialAggregationBuffer,
     StructType.fromAttributes(aggregateFunctions.flatMap(_.aggBufferAttributes)),
     StructType.fromAttributes(groupingExpressions.map(_.toAttribute)),
     TaskContext.get(),
     1024 * 16, // initial capacity
-    TaskContext.get().taskMemoryManager().pageSizeBytes
-  )
+    TaskContext.get().taskMemoryManager().pageSizeBytes)
+  }
 
   private def genNonIncMetaData(aggregateExpressions: Seq[AggregateExpression],
                                 inputAttributes: Seq[Attribute]): Seq[NonIncMetaPerExpr] = {
@@ -189,19 +205,36 @@ extends Iterator[InternalRow] with Logging {
     }
   }
 
-  private[this] val hashMapforMetaData = new SlothAggMetaMap(
-    groupingExpressions, nonIncMetaData.length, stateInfo, storeConf, hadoopConf, watermarkForKey)
+  private[this] val hashMapforMetaData = if (aggRT != null) {
+    aggRT.hashMapforMetaData.reInit(stateInfo, storeConf, hadoopConf)
+    aggRT.hashMapforMetaData
+  } else {
+    new SlothAggMetaMap(groupingExpressions,
+      nonIncMetaData.length, stateInfo, storeConf, hadoopConf, watermarkForKey)
+  }
+
 
   private[this] val hashMapforFullData = if (nonIncMetaData.nonEmpty) {
-    new SlothAggFullMap(groupingExpressions,
-      originalInputAttributes, stateInfo, storeConf, hadoopConf, watermarkForData)
+    if (aggRT != null) {
+      aggRT.hashMapforFullData.reInit(stateInfo, storeConf, hadoopConf)
+      aggRT.hashMapforFullData
+    } else {
+      new SlothAggFullMap(groupingExpressions,
+        originalInputAttributes, stateInfo, storeConf, hadoopConf, watermarkForData)
+    }
   } else { null }
 
   // private[this] val hashMapforFullData: SlothAggFullMap = null
 
-  private[this] val stateStoreforResult = new SlothAggResultStore(
-    groupingExpressions, aggregateFunctions.flatMap(_.aggBufferAttributes),
-    stateInfo, storeConf, hadoopConf, watermarkForKey)
+  private[this] val stateStoreforResult =
+    if (aggRT != null) {
+      aggRT.stateStoreforResult.reInit(stateInfo, storeConf, hadoopConf)
+      aggRT.stateStoreforResult
+    } else {
+      new SlothAggResultStore(
+        groupingExpressions, aggregateFunctions.flatMap(_.aggBufferAttributes),
+        stateInfo, storeConf, hadoopConf, watermarkForKey)
+    }
 
   // Initializing functions used to process a row.
   protected def generateProcessRow(
@@ -290,13 +323,16 @@ extends Iterator[InternalRow] with Logging {
 
       if (hashMapforFullData != null) {
         val newID = hashMapforMetaData.allocID(groupKey)
-        hashMapforFullData.put(groupKey, newID, unsafeInput)
+        hashMapforFullData.put(groupKey, newID, true, unsafeInput)
       }
     } else {
       hashMapforMetaData.decCounter(groupKey)
 
       if (hashMapforFullData != null) {
-        hashMapforFullData.remove(groupKey, hashMapforMetaData.getOldMaxID(groupKey), unsafeInput)
+        val newID = hashMapforMetaData.allocID(groupKey)
+        hashMapforFullData.put(groupKey, newID, false, unsafeInput)
+        // hashMapforFullData.remove(groupKey,
+        // hashMapforMetaData.getOldMaxID(groupKey), unsafeInput)
       }
     }
 
@@ -343,6 +379,8 @@ extends Iterator[InternalRow] with Logging {
   // Recompute NonInc functions (i.e. max/min)
   private def computeNonInc(): Unit = {
     if (hashMapforFullData != null) {
+      val start = System.nanoTime()
+      val numKeys = hashMapforFullData.getNumKeys
       for ((nonIncMetaPerExpr, exprIndex) <- nonIncMetaData.zipWithIndex) {
         val iter = hashMapforFullData.getGroupIteratorbyExpr(
           nonIncMetaPerExpr, exprIndex, hashMapforMetaData)
@@ -354,6 +392,7 @@ extends Iterator[InternalRow] with Logging {
           processDeclarative(buffer, row)
         })
       }
+      print(s"Sort Time ${(System.nanoTime() - start)/1000000} ms, ${numKeys} keys\n")
     }
   }
 
@@ -369,7 +408,12 @@ extends Iterator[InternalRow] with Logging {
     }
   }
 
-  private val generateOutput: (UnsafeRow, UnsafeRow) => UnsafeRow = generateResultProjection()
+  private val generateOutput: (UnsafeRow, UnsafeRow) => UnsafeRow =
+    if (aggRT != null) {
+      aggRT.generateOutput
+    } else {
+      generateResultProjection()
+    }
 
   private[this] var resultIter: KVIterator[UnsafeRow, UnsafeRow] = _
   private[this] var resultIterHasNext: Boolean = _
@@ -380,6 +424,7 @@ extends Iterator[InternalRow] with Logging {
   processInputs()
   computeNonInc()
 
+  stateStoreforResult.scan()
   resultIter = hashMapforResult.iterator()
   resultIterHasNext = resultIter.next()
 
@@ -555,5 +600,29 @@ extends Iterator[InternalRow] with Logging {
     }
 
     stateStoreforResult.commit()
+
+    hashMapforMetaData.purge()
+    if (hashMapforFullData != null) hashMapforFullData.purge()
+    stateStoreforResult.purge()
+    if (aggRT == null) {
+      aggRT = new SlothAggIterRuntime(
+        groupingProjection,
+        initialAggregationBuffer,
+        generateOutput,
+        hashMapforResult,
+        hashMapforMetaData,
+        hashMapforFullData,
+        stateStoreforResult)
+    }
+    SlothRuntimeCache.put(opRtId, aggRT)
   }
 }
+
+case class SlothAggIterRuntime (
+  groupingProjection: UnsafeProjection,
+  initialAggregationBuffer: UnsafeRow,
+  generateOutput: (UnsafeRow, UnsafeRow) => UnsafeRow,
+  hashMapforResult: SlothAggResultMap,
+  hashMapforMetaData: SlothAggMetaMap,
+  hashMapforFullData: SlothAggFullMap,
+  stateStoreforResult: SlothAggResultStore) extends SlothRuntime {}

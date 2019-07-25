@@ -46,9 +46,20 @@ class SlothAggMetaMap (
     hadoopConf: Configuration,
     watermarkForKey: Option[Predicate]) {
 
-  private val hashMap = HashMap.empty[UnsafeRow, AggMetaData]
+  private var hashMap = HashMap.empty[UnsafeRow, AggMetaData]
   private val metaStore = new GroupKeytoMetaStore(groupExpressions,
     stateInfo, storeConf, hadoopConf, watermarkForKey)
+
+  def reInit(stateInfo: Option[StatefulOperatorStateInfo],
+             storeConf: StateStoreConf,
+             hadoopConf: Configuration): Unit = {
+    hashMap = HashMap.empty[UnsafeRow, AggMetaData]
+    metaStore.reInit(stateInfo, storeConf, hadoopConf)
+  }
+
+  def purge(): Unit = {
+    hashMap = null
+  }
 
   def newEntry(groupkey: UnsafeRow): Unit = {
     hashMap += (groupkey.copy() -> metaStore.get(groupkey))
@@ -132,9 +143,9 @@ class SlothAggMetaMap (
 
   private class GroupKeytoMetaStore (
     groupExpression: Seq[NamedExpression],
-    stateInfo: Option[StatefulOperatorStateInfo],
-    storeConf: StateStoreConf,
-    hadoopConf: Configuration,
+    var stateInfo: Option[StatefulOperatorStateInfo],
+    var storeConf: StateStoreConf,
+    var hadoopConf: Configuration,
     watermarkForKey: Option[Predicate]) extends Logging {
 
     private val storeName = "GroupKeytoMetaStore"
@@ -149,7 +160,16 @@ class SlothAggMetaMap (
     private val valueProj = UnsafeProjection.create(valSchema)
     private val valueRow = valueProj(new SpecificInternalRow(valSchema))
 
-    private val stateStore = getStateStore(keySchema, valSchema)
+    private var stateStore = getStateStore(keySchema, valSchema)
+
+    def reInit(stateInfo: Option[StatefulOperatorStateInfo],
+               storeConf: StateStoreConf,
+               hadoopConf: Configuration): Unit = {
+      this.stateInfo = stateInfo
+      this.storeConf = storeConf
+      this.hadoopConf = hadoopConf
+      stateStore = getStateStore(keySchema, valSchema)
+    }
 
     /** Get the meta data for a group key */
     def get(key: UnsafeRow): AggMetaData = {

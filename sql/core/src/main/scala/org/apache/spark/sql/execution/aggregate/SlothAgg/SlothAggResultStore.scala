@@ -30,9 +30,9 @@ import org.apache.spark.sql.types._
 class SlothAggResultStore(
     groupExpressions: Seq[NamedExpression],
     aggBufferAttributes: Seq[Attribute],
-    stateInfo: Option[StatefulOperatorStateInfo],
-    storeConf: StateStoreConf,
-    hadoopConf: Configuration,
+    var stateInfo: Option[StatefulOperatorStateInfo],
+    var storeConf: StateStoreConf,
+    var hadoopConf: Configuration,
     watermarkForKey: Option[Predicate]) extends Logging {
 
   private val keySchema = StructType(groupExpressions.zipWithIndex.map {
@@ -42,7 +42,20 @@ class SlothAggResultStore(
 
   private val storeName = "GroupKeyToResultDataStore"
 
-  private val stateStore = getStateStore(keySchema, valSchema)
+  private var stateStore = getStateStore(keySchema, valSchema)
+
+  def reInit(stateInfo: Option[StatefulOperatorStateInfo],
+             storeConf: StateStoreConf,
+             hadoopConf: Configuration): Unit = {
+    this.stateInfo = stateInfo
+    this.storeConf = storeConf
+    this.hadoopConf = hadoopConf
+    stateStore = getStateStore(keySchema, valSchema)
+  }
+
+  def purge(): Unit = {
+
+  }
 
   def get(groupKey: UnsafeRow): UnsafeRow = {
     stateStore.get(groupKey)
@@ -54,6 +67,21 @@ class SlothAggResultStore(
 
   def remove(groupKey: UnsafeRow): Unit = {
     stateStore.remove(groupKey)
+  }
+
+  def isChanged(key: UnsafeRow): Boolean = {
+    if (key != null) false
+    else true
+  }
+
+  // This is just to simulate the cost of scanning the hash table state
+  // It actually does nothing
+  def scan(): Unit = {
+    stateStore.getRange(None, None)
+      .foreach(rowPair => {
+        if (isChanged(rowPair.key)) {
+          stateStore.remove(rowPair.key)
+        }})
   }
 
   def commit(): Unit = {

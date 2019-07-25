@@ -140,23 +140,41 @@ case class SlothThetaJoinExec (
     }
 
     val numOutputRows = longMetric("numOutputRows")
-    val leftTimeMs = longMetric("leftTimeMs")
-    val rightTimeMs = longMetric("rightTimeMs")
-    val scanTimeMs = longMetric("scanTimeMs")
     val commitTimeMs = longMetric("commitTimeMs")
     val stateMemory = longMetric("stateMemory")
 
     val joinedRow1 = new JoinedRow
     val joinedRow2 = new JoinedRow
 
-    val postJoinFilter =
-      newPredicate(condition.bothSides.getOrElse(Literal(true)), left.output ++ right.output).eval _
-    val leftSideJoiner = new OneSideHashJoiner(
-      LeftSide, left.output, leftKeys, leftInputIter,
-      condition.leftSideOnly, postJoinFilter, stateWatermarkPredicates.left)
-    val rightSideJoiner = new OneSideHashJoiner(
-      RightSide, right.output, rightKeys, rightInputIter,
-      condition.rightSideOnly, postJoinFilter, stateWatermarkPredicates.right)
+    val opRtId = new SlothRuntimeOpId(stateInfo.get.operatorId, stateInfo.get.queryRunId)
+    val opRunTime = SlothRuntimeCache.get(opRtId)
+    var thetaRunTime: SlothThetaJoinRuntime = null
+
+    if (opRunTime == null) {
+      val outputProj = UnsafeProjection.create(left.output ++ right.output, output)
+      val postJoinFilter =
+        newPredicate(condition.bothSides.getOrElse(Literal(true)),
+          left.output ++ right.output).eval _
+      val leftStateManager = new SlothThetaJoinStateManager(
+        LeftSide, left.output, stateInfo, storeConf, hadoopConfBcast.value.value)
+      val rightStateManager = new SlothThetaJoinStateManager(
+        RightSide, right.output, stateInfo, storeConf, hadoopConfBcast.value.value)
+
+      thetaRunTime = new SlothThetaJoinRuntime(
+        outputProj, postJoinFilter, leftStateManager, rightStateManager)
+    } else {
+      thetaRunTime = opRunTime.asInstanceOf[SlothThetaJoinRuntime]
+
+      thetaRunTime.leftStateManager.reInit(stateInfo, storeConf, hadoopConfBcast.value.value)
+      thetaRunTime.rightStateManager.reInit(stateInfo, storeConf, hadoopConfBcast.value.value)
+    }
+
+    val leftSideJoiner = new OneSideThetaJoiner(
+      LeftSide, left.output, leftKeys, leftInputIter, condition.leftSideOnly,
+      thetaRunTime.postFilterFunc, stateWatermarkPredicates.left, thetaRunTime.leftStateManager)
+    val rightSideJoiner = new OneSideThetaJoiner(
+      RightSide, right.output, rightKeys, rightInputIter, condition.rightSideOnly,
+      thetaRunTime.postFilterFunc, stateWatermarkPredicates.right, thetaRunTime.rightStateManager)
 
     //  Join one side input using the other side's buffered/state rows. Here is how it is done.
     //
@@ -188,26 +206,7 @@ case class SlothThetaJoinExec (
         joinedRow2.withLeft(matched).withRight(input)
       })
 
-    var startTimeNs: Long = System.nanoTime()
-    def onLeftCompletion: Unit = {
-      val endTimeNs = System.nanoTime
-      leftTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
-      startTimeNs = endTimeNs
-    }
-
-    def onRightCompletion: Unit = {
-      val endTimeNs = System.nanoTime
-      rightTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
-      startTimeNs = endTimeNs
-    }
-
-    val leftIterWithMetrics = CompletionIterator[InternalRow, Iterator[InternalRow]](
-      leftOutputIter, onLeftCompletion)
-
-    val rightIterWithMetrics = CompletionIterator[InternalRow, Iterator[InternalRow]](
-      rightOutputIter, onRightCompletion)
-
-    val outputIter = leftIterWithMetrics ++ rightIterWithMetrics
+    val outputIter = rightOutputIter ++ leftOutputIter
 
     val outputProjection = UnsafeProjection.create(left.output ++ right.output, output)
     val outputIterWithMetrics = outputIter.map { row =>
@@ -220,9 +219,6 @@ case class SlothThetaJoinExec (
 
     // TODO: we do not consider removing old state now
     def onAllCompletion: Unit = {
-      val endTimeNs = System.nanoTime
-      scanTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
-
       // Commit all state changes and update state store metrics
       commitTimeMs += timeTakenMs {
         val leftSideMetrics = leftSideJoiner.commitStateAndGetMetrics()
@@ -230,6 +226,10 @@ case class SlothThetaJoinExec (
         val combinedMetrics = StateStoreMetrics.combine(Seq(leftSideMetrics, rightSideMetrics))
         stateMemory += combinedMetrics.memoryUsedBytes
       }
+
+      thetaRunTime.leftStateManager.purgeState()
+      thetaRunTime.rightStateManager.purgeState()
+      SlothRuntimeCache.put(opRtId, thetaRunTime)
     }
 
     CompletionIterator[InternalRow, Iterator[InternalRow]](
@@ -256,21 +256,21 @@ case class SlothThetaJoinExec (
    *                                [[StreamingSymmetricHashJoinExec]] for further description of
    *                                state watermarks.
    */
-  private class OneSideHashJoiner(
+  private class OneSideThetaJoiner(
       joinSide: JoinSide,
       inputAttributes: Seq[Attribute],
       joinKeys: Seq[Expression],
       inputIter: Iterator[InternalRow],
       preJoinFilterExpr: Option[Expression],
       postJoinFilter: InternalRow => Boolean,
-      stateWatermarkPredicate: Option[JoinStateWatermarkPredicate]) {
+      stateWatermarkPredicate: Option[JoinStateWatermarkPredicate],
+      stateManager: SlothThetaJoinStateManager) {
 
     // Filter the joined rows based on the given condition.
     val preJoinFilter: InternalRow => Boolean =
       newPredicate(preJoinFilterExpr.getOrElse(Literal(true)), inputAttributes).eval _
 
-    private val joinStateManager = new SlothThetaJoinStateManager(
-      joinSide, inputAttributes, stateInfo, storeConf, hadoopConfBcast.value.value)
+    private val joinStateManager = stateManager
 
     private[this] val thisWIDGenerator = UnsafeProjection.create(joinKeys, inputAttributes)
     private[this] var thisWID: UnsafeRow = _
@@ -379,7 +379,7 @@ case class SlothThetaJoinExec (
                    deleteRow: UnsafeRow,
                    isInsert: Boolean,
                    updateCase: Boolean,
-                   otherSideJoiner: OneSideHashJoiner,
+                   otherSideJoiner: OneSideThetaJoiner,
                    generateJoinedRow1: (InternalRow, InternalRow) => JoinedRow,
                    generateJoinedRow2: (InternalRow, InternalRow) => JoinedRow) =>
     {
@@ -423,7 +423,7 @@ case class SlothThetaJoinExec (
       outputIter
     }: Iterator[JoinedRow]
 
-    def generateJoinOneRow(): (UnsafeRow, UnsafeRow, Boolean, Boolean, OneSideHashJoiner,
+    def generateJoinOneRow(): (UnsafeRow, UnsafeRow, Boolean, Boolean, OneSideThetaJoiner,
       (InternalRow, InternalRow) => JoinedRow, (InternalRow, InternalRow) => JoinedRow)
       => Iterator[JoinedRow] = {
       joinType match {
@@ -445,7 +445,7 @@ case class SlothThetaJoinExec (
      *                          input row from this side and the matched row from the other side
      */
     def storeAndJoinWithOtherSide(
-        otherSideJoiner: OneSideHashJoiner,
+        otherSideJoiner: OneSideThetaJoiner,
         generateJoinedRow1: (InternalRow, InternalRow) => JoinedRow,
         generateJoinedRow2: (InternalRow, InternalRow) => JoinedRow):
     Iterator[InternalRow] = {
@@ -518,3 +518,9 @@ case class SlothThetaJoinExec (
     def numUpdatedStateRows: Long = updatedStateRowsCount
   }
 }
+
+case class SlothThetaJoinRuntime (
+  outputProj: UnsafeProjection,
+  postFilterFunc: InternalRow => Boolean,
+  leftStateManager: SlothThetaJoinStateManager,
+  rightStateManager: SlothThetaJoinStateManager) extends SlothRuntime {}

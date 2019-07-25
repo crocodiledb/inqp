@@ -74,7 +74,7 @@ case class DataSourceV2ScanExec(
     case _ => super.outputPartitioning
   }
 
-  private lazy val partitions: Seq[InputPartition[InternalRow]] = {
+  lazy val partitions: Seq[InputPartition[InternalRow]] = {
     reader.planInputPartitions().asScala
   }
 

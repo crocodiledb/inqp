@@ -20,19 +20,21 @@ package org.apache.spark.sql.execution.streaming
 import java.util.Optional
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 import scala.collection.mutable.{Map => MutableMap}
 
 import org.apache.spark.sql.{Dataset, SlothDBContext, SparkSession}
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.catalyst.expressions.{Alias, CurrentBatchTimestamp, CurrentDate, CurrentTimestamp}
 import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, Project}
-import org.apache.spark.sql.execution.SQLExecution
+import org.apache.spark.sql.execution.{SlothProjectExec, SQLExecution}
 import org.apache.spark.sql.execution.datasources.v2.{StreamingDataSourceV2Relation, WriteToDataSourceV2}
 import org.apache.spark.sql.execution.streaming.sources.MicroBatchWriter
 import org.apache.spark.sql.sources.v2.{DataSourceOptions, DataSourceV2, MicroBatchReadSupport, StreamWriteSupport}
 import org.apache.spark.sql.sources.v2.reader.streaming.{MicroBatchReader, Offset => OffsetV2}
 import org.apache.spark.sql.streaming.{OutputMode, ProcessingTime, Trigger}
 import org.apache.spark.util.{Clock, Utils}
+
 
 class MicroBatchExecution(
     sparkSession: SparkSession,
@@ -61,6 +63,10 @@ class MicroBatchExecution(
   }
 
   private var watermarkTracker: WatermarkTracker = _
+
+  // SlothDB: Adding Projection Id
+  val projArray = new mutable.ArrayBuffer[Tuple2[SlothProjectExec, Long]]()
+  var projId = 100
 
   override lazy val logicalPlan: LogicalPlan = {
     assert(queryExecutionThread eq Thread.currentThread,
@@ -529,7 +535,7 @@ class MicroBatchExecution(
         offsetSeqMetadata)
       lastExecution.executedPlan // Force the lazy generation of execution plan
       // SlothDB: some SlothDB optimizations
-      lastExecution.slothdbOptimization()
+      if (SlothDBContext.enable_slothdb) lastExecution.slothdbOptimization(runId, this)
     }
 
     val nextBatch =

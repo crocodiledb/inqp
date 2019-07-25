@@ -17,6 +17,8 @@
 
 package totem.middleground.tpch
 
+import java.util.concurrent.TimeUnit
+
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.Trigger
@@ -56,12 +58,14 @@ object DataUtils {
       .load(path)
   }
 
-  def writeToSink(query_result: DataFrame): Unit = {
+  def writeToSink(query_result: DataFrame, query_name: String): Unit = {
     val q = query_result
       .writeStream
       .outputMode("append")
       .format("console")
-      .trigger(Trigger.ProcessingTime("2 seconds"))
+      .trigger(Trigger.ProcessingTime(100, TimeUnit.MILLISECONDS))
+       // .option("checkpointLocation", TPCHSchema.checkpointLocation + "/" + "query")
+      .queryName(query_name)
       .start()
 
     q.awaitTermination()

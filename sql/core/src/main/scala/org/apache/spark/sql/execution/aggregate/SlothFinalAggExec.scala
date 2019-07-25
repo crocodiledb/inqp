@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.execution.aggregate
 
+import java.util.UUID
+
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.errors._
@@ -26,7 +28,8 @@ import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.aggregate.SlothAgg.SlothFinalAgg
-import org.apache.spark.util.Utils
+import org.apache.spark.sql.execution.streaming.SlothRuntimeOpId
+import org.apache.spark.util.{CompletionIterator, Utils}
 
 case class SlothFinalAggExec (
     requiredChildDistributionExpressions: Option[Seq[Expression]],
@@ -65,10 +68,18 @@ case class SlothFinalAggExec (
     }
   }
 
+  private var opId: Long = _
+  private var runId: UUID = _
+
+  def setId(opId: Long, runId: UUID): Unit = {
+    this.opId = opId
+    this.runId = runId
+  }
+
   protected override def doExecute(): RDD[InternalRow] = attachTree(this, "execute") {
 
     child.execute().mapPartitionsWithIndex { (partIndex, iter) => {
-        val finalAgg = new SlothFinalAgg(
+      val finalAgg = new SlothFinalAgg(
           partIndex,
           groupingExpressions,
           child.output,
@@ -77,12 +88,13 @@ case class SlothFinalAggExec (
           initialInputBufferOffset,
           resultExpressions,
           (expressions, inputSchema) =>
-            newMutableProjection(expressions, inputSchema, subexpressionEliminationEnabled)
-        )
+            newMutableProjection(expressions, inputSchema, subexpressionEliminationEnabled),
+        new SlothRuntimeOpId(opId, runId))
 
-        iter.map(finalAgg.processFinalRow)
-      }
-    }
+      CompletionIterator[InternalRow, Iterator[InternalRow]](
+        iter.map(finalAgg.processFinalRow),
+        finalAgg.onCompletion())
+    }}
   }
 
   def isAggregateExpr(expr: NamedExpression): Boolean = {

@@ -22,6 +22,7 @@ import scala.collection.mutable.ArrayBuffer
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
+import org.apache.spark.sql.execution.streaming.{SlothRuntime, SlothRuntimeCache, SlothRuntimeOpId}
 
 class SlothFinalAgg(
     partIndex: Int,
@@ -31,7 +32,8 @@ class SlothFinalAgg(
     aggregateAttributes: Seq[Attribute],
     initialInputBufferOffset: Int,
     resultExpressions: Seq[NamedExpression],
-    newMutableProjection: (Seq[Expression], Seq[Attribute]) => MutableProjection) {
+    newMutableProjection: (Seq[Expression], Seq[Attribute]) => MutableProjection,
+    opRtId: SlothRuntimeOpId) {
 
   // Initialize all AggregateFunctions by binding references if necessary,
   // and set inputBufferOffset and mutableBufferOffset.
@@ -139,17 +141,25 @@ class SlothFinalAgg(
     }
   }
 
+  private val curRt = SlothRuntimeCache.get(opRtId)
+  private var finalRt =
+    if (curRt != null) {curRt.asInstanceOf[SlothFinalAggRuntime]}
+    else null
+
   private val generateOutput: (UnsafeRow, InternalRow) => UnsafeRow =
-    generateResultProjection()
+    if (finalRt != null) finalRt.generateOutput
+    else generateResultProjection()
 
   private val groupingProjection: UnsafeProjection =
-    UnsafeProjection.create(groupingExpressions, originalInputAttributes)
+    if (finalRt != null) finalRt.groupingProjection
+    else UnsafeProjection.create(groupingExpressions, originalInputAttributes)
 
   private val aggBufferExpression =
     aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes)
 
   private val bufferProjection: UnsafeProjection =
-    UnsafeProjection.create(aggBufferExpression, originalInputAttributes)
+    if (finalRt != null) finalRt.bufferProjection
+    else UnsafeProjection.create(aggBufferExpression, originalInputAttributes)
 
   val processFinalRow = (input: InternalRow) => {
     val groupingKey = if (groupingExpressions.isEmpty) {groupingProjection.apply(null)}
@@ -160,4 +170,22 @@ class SlothFinalAgg(
 
     output
   }: InternalRow
+
+
+  def onCompletion(): Unit = {
+    if (finalRt == null) {
+      finalRt = new SlothFinalAggRuntime(
+        generateOutput,
+        groupingProjection,
+        bufferProjection)
+    }
+
+    SlothRuntimeCache.put(opRtId, finalRt)
+  }
+
 }
+
+case class SlothFinalAggRuntime (
+  generateOutput: (UnsafeRow, InternalRow) => UnsafeRow,
+  groupingProjection: UnsafeProjection,
+  bufferProjection: UnsafeProjection) extends SlothRuntime {}

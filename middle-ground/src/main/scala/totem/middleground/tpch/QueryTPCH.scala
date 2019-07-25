@@ -30,6 +30,8 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
   DataUtils.bootstrap = bootstrap
   TPCHSchema.setQueryMetaData(numBatch, SF, checkpoint)
 
+  private var query_name: String = null
+
   def execQuery(query: String): Unit = {
     val sparkConf = new SparkConf()
       .set(SQLConf.SHUFFLE_PARTITIONS.key, shuffleNum)
@@ -40,7 +42,9 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .appName("Executing Query " + query)
       .getOrCreate()
 
-    query.toLowerCase match {
+    query_name = query.toLowerCase
+
+    query_name match {
       case "q1" =>
         execQ1(spark)
       case "q2" =>
@@ -85,6 +89,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
         execQ21(spark)
       case "q22" =>
         execQ22(spark)
+      case "q_highbalance" =>
+        execHighBalance(spark)
+      case "q18_a" =>
+        execQ18_a(spark)
       case _ =>
         printf("Not yet supported %s", query)
     }
@@ -122,7 +130,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
 
     // result.explain(true)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ2_subquery(spark: SparkSession): DataFrame = {
@@ -166,12 +174,12 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val result = subquery1
       .join(subquery2, ($"p_partkey" ===  $"min_partkey")
         and ($"ps_supplycost" === $"min_supplycost"))
-      .orderBy(desc("s_acctbal"), $"n_name", $"s_name", $"p_partkey")
+      // .orderBy(desc("s_acctbal"), $"n_name", $"s_name", $"p_partkey")
       .select($"s_acctbal", $"s_name", $"n_name",
         $"p_partkey", $"p_mfgr", $"s_address", $"s_phone", $"s_comment")
-      .limit(100)
+      // .limit(100)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ3(spark: SparkSession): Unit = {
@@ -191,13 +199,13 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .groupBy("l_orderkey", "o_orderdate", "o_shippriority")
       .agg(
         sum_disc_price($"l_extendedprice", $"l_discount").alias("revenue"))
-      .orderBy(desc("revenue"), $"o_orderdate")
+      // .orderBy(desc("revenue"), $"o_orderdate")
       .select("l_orderkey", "revenue", "o_orderdate", "o_shippriority")
       // .limit(10)
 
     // result.explain(false)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ4(spark: SparkSession): Unit = {
@@ -217,11 +225,11 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .groupBy("o_orderpriority")
       .agg(
         order_count(lit(1)).alias("order_count"))
-      .orderBy("o_orderpriority")
+    //  .orderBy("o_orderpriority")
 
     // result.explain(false)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ5(spark: SparkSession): Unit = {
@@ -250,11 +258,11 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .groupBy("n_name")
       .agg(
         sum_disc_price($"l_extendedprice", $"l_discount" ).alias("revenue"))
-      .orderBy(desc("revenue"))
+    //  .orderBy(desc("revenue"))
 
     // result.explain(true)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ6(spark: SparkSession): Unit = {
@@ -271,7 +279,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     )
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ7(spark: SparkSession): Unit = {
@@ -301,10 +309,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .groupBy("supp_nation", "cust_nation", "l_year")
       .agg(
         sum_disc_price($"l_extendedprice", $"l_discount").as("revenue"))
-      .orderBy("supp_nation", "cust_nation", "l_year")
+    //  .orderBy("supp_nation", "cust_nation", "l_year")
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ8(spark: SparkSession): Unit = {
@@ -337,10 +345,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
         ($"l_extendedprice" * ($"l_discount" - 1) * -1).as("volume"), $"n2_name")
       .groupBy($"o_year")
       .agg(udaf_q8($"n2_name", $"volume").as("mkt_share"))
-      .orderBy($"o_year")
+    //  .orderBy($"o_year")
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ9(spark: SparkSession): Unit = {
@@ -368,10 +376,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .groupBy("nation", "o_year")
       .agg(
         doubleSum($"amount").as("sum_profit"))
-      .orderBy($"nation", desc("o_year"))
+    //  .orderBy($"nation", desc("o_year"))
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ10(spark: SparkSession): Unit = {
@@ -392,10 +400,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .groupBy("c_custkey", "c_name", "c_acctbal", "c_phone", "n_name", "c_address", "c_comment")
       .agg(
         revenue($"l_extendedprice", $"l_discount").as("revenue"))
-      .orderBy(desc("revenue"))
+    //  .orderBy(desc("revenue"))
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ11_subquery(spark: SparkSession): DataFrame = {
@@ -433,10 +441,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
         doubleSum($"ps_supplycost" * $"ps_availqty").as("value"))
       .join(subquery, $"value" > $"small_value", "cross")
       .select($"ps_partkey", $"value")
-      .orderBy(desc("value"))
+    //  .orderBy(desc("value"))
 
     // result.explain()
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ12(spark: SparkSession): Unit = {
@@ -457,11 +465,11 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .agg(
           udaf_q12_high($"o_orderpriority").as("high_line_count"),
           udaf_q12_low($"o_orderpriority").as("low_line_count"))
-      .orderBy($"l_shipmode")
+      // .orderBy($"l_shipmode")
 
     // result.explain(true)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ13(spark: SparkSession): Unit = {
@@ -481,11 +489,11 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .groupBy($"c_count")
       .agg(
         custdist(lit(1)).as("custdist"))
-      .orderBy(desc("custdist"), desc("c_count"))
+    //  .orderBy(desc("custdist"), desc("c_count"))
 
     // result.explain(true)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ14(spark: SparkSession): Unit = {
@@ -504,7 +512,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
         sum_disc_price($"l_extendedprice", $"l_discount")) * 100).as("promo_revenue"))
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ15_subquery(spark: SparkSession): DataFrame = {
@@ -524,6 +532,8 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
   def execQ15(spark: SparkSession): Unit = {
     import spark.implicits._
 
+    val count = new Count
+
     val s = DataUtils.loadStreamTable(spark, "supplier", "s")
     val revenue = execQ15_subquery(spark)
     val max_revenue = execQ15_subquery(spark).agg(max($"total_revenue").as("max_revenue"))
@@ -531,12 +541,12 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     // val result = revenue.join(max_revenue, $"total_revenue" === $"max_revenue")
     //     .select($"supplier_no", $"total_revenue")
     val result = s.join(revenue, $"s_suppkey" === $"supplier_no")
-     .join(max_revenue, $"total_revenue" === $"max_revenue")
+     .join(max_revenue, $"total_revenue" >= $"max_revenue", "cross")
      .select("s_suppkey", "s_name", "s_address", "s_phone", "total_revenue")
-     .orderBy("s_suppkey")
+    // .orderBy("s_suppkey")
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ16(spark: SparkSession): Unit = {
@@ -561,10 +571,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .dropDuplicates()
       .groupBy($"p_brand", $"p_type", $"p_size")
       .agg(supplier_cnt($"ps_suppkey").as("supplier_cnt"))
-      .orderBy(desc("supplier_cnt"), $"p_brand", $"p_type", $"p_size")
+    //  .orderBy(desc("supplier_cnt"), $"p_brand", $"p_type", $"p_size")
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ17(spark: SparkSession): Unit = {
@@ -583,14 +593,14 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
         (doubleAvg($"l_quantity") * 0.2).as("avg_quantity"))
       .select($"l_partkey".as("agg_l_partkey"), $"avg_quantity")
 
-    val result = l.join(p, $"l_partkey" === $"p_partkey")
-      .join(agg_l, $"p_partkey" === $"agg_l_partkey" and
-        $"l_quantity" < $"avg_quantity")
+    val result = agg_l.join(l, $"agg_l_partkey" === $"l_partkey" and
+      $"l_quantity" < $"avg_quantity")
+      .join(p, $"l_partkey" === $"p_partkey")
       .agg(
         (doubleSum($"l_extendedprice") / 7.0).as("avg_yearly"))
 
-    // result.explain(true)
-    DataUtils.writeToSink(result)
+    // result.explain(false)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ18(spark: SparkSession): Unit = {
@@ -605,7 +615,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .groupBy("l_orderkey")
       .agg(doubleSum1($"l_quantity").as("sum_quantity"))
-      .filter($"sum_quantity" > 300)
+      .filter($"sum_quantity" > 312)
       .select($"l_orderkey".as("agg_orderkey"))
 
     val result = o.join(agg_l, $"o_orderkey" === $"agg_orderkey", "left_semi")
@@ -613,10 +623,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .join(c, $"o_custkey" === $"c_custkey")
       .groupBy("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
       .agg(doubleSum2($"l_quantity"))
-      .orderBy(desc("o_totalprice"), $"o_orderdate")
+    //  .orderBy(desc("o_totalprice"), $"o_orderdate")
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ19(spark: SparkSession): Unit = {
@@ -649,7 +659,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
 
     // result.explain(true)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ20(spark: SparkSession): Unit = {
@@ -670,21 +680,20 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
 
     val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
 
-    val subquery = ps.join(p, $"ps_partkey" === $"p_partkey", "left_semi")
-      .join(agg_l, $"ps_partkey" === $"agg_l_partkey"
+    val subquery = ps.join(agg_l, $"ps_partkey" === $"agg_l_partkey"
         and $"ps_suppkey" === $"agg_l_suppkey" and $"ps_availqty" > $"agg_l_sum")
+      .join(p, $"ps_partkey" === $"p_partkey", "left_semi")
       .select("ps_suppkey")
 
     val s = DataUtils.loadStreamTable(spark, "supplier", "s")
     val n = DataUtils.loadStreamTable(spark, "nation", "n")
       .filter($"n_name" === "CANADA")
 
-    val result = s.join(n, $"s_nationkey" === $"n_nationkey")
-      .join(subquery, $"s_suppkey" === $"ps_suppkey", "left_semi")
+    val result = s.join(subquery, $"s_suppkey" === $"ps_suppkey", "left_semi")
+      .join(n, $"s_nationkey" === $"n_nationkey")
       .select($"s_name", $"s_address")
 
-    // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ21(spark: SparkSession): Unit = {
@@ -697,7 +706,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .filter($"l_receiptdate" > $"l_commitdate")
     val o = DataUtils.loadStreamTable(spark, "orders", "o")
       .filter($"o_orderstatus" === "F")
-    val n = DataUtils.loadStaticTable(spark, "nation", "n")
+    val n = DataUtils.loadStreamTable(spark, "nation", "n")
       .filter($"n_name" === "SAUDI ARABIA")
 
     val init_result = l1.join(o, $"l_orderkey" === $"o_orderkey")
@@ -712,17 +721,18 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .select($"l_orderkey".as("l3_orderkey"),
       $"l_suppkey".as("l3_suppkey"))
 
-    val result = init_result.join(l2, ($"l_orderkey" === $"l2_orderkey")
-      and ($"l_suppkey" =!= $"l2_suppkey"), "left_semi")
-       .join(l3, ($"l_orderkey" === $"l3_orderkey")
-         and ($"l_suppkey" =!= $"l3_suppkey"), "left_anti")
+    val result = init_result
+      .join(l2, ($"l_orderkey" === $"l2_orderkey")
+        and ($"l_suppkey" =!= $"l2_suppkey"), "left_semi")
+      .join(l3, ($"l_orderkey" === $"l3_orderkey")
+        and ($"l_suppkey" =!= $"l3_suppkey"), "left_anti")
       .groupBy("s_name")
       .agg(count(lit(1)).as("numwait"))
-      .orderBy(desc("numwait"), $"s_name")
+    //  .orderBy(desc("numwait"), $"s_name")
 
     // result.explain(true)
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execQ22(spark: SparkSession): Unit = {
@@ -745,15 +755,53 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val o = DataUtils.loadStreamTable(spark, "orders", "o")
 
     val result = c.join(subquery1, $"c_acctbal" > $"avg_acctbal", "cross")
-      .join(o, $"c_custkey" === $"o_custkey", "left_anti")
-      .select(substring($"c_phone", 1, 2).as("cntrycode"), $"c_acctbal")
-      .groupBy($"cntrycode")
-      .agg(numcust(lit(1)).as("numcust"),
-        doubleSum($"c_acctbal").as("totalacctbal"))
-      .orderBy($"cntrycode")
+       .join(o, $"c_custkey" === $"o_custkey", "left_anti")
+       .select(substring($"c_phone", 1, 2).as("cntrycode"), $"c_acctbal")
+       .groupBy($"cntrycode")
+       .agg(numcust(lit(1)).as("numcust"),
+         doubleSum($"c_acctbal").as("totalacctbal"))
+       // .orderBy($"cntrycode")
 
     // result.explain(true)
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
+  }
+
+  def execHighBalance(spark: SparkSession): Unit = {
+    import spark.implicits._
+
+    val avgBal = new DoubleAvg
+    val agg_c = DataUtils.loadStreamTable(spark, "customer", "c")
+      .agg(avgBal($"c_acctbal").as("avg_bal"))
+
+    val count = new Count
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val result = c.join(agg_c, $"c_acctbal" > $"avg_bal", "cross")
+        .agg(count(lit(1L)).as("high balance customer"))
+
+    DataUtils.writeToSink(result, query_name)
+  }
+
+  def execQ18_a(spark: SparkSession): Unit = {
+    import spark.implicits._
+
+    val doubleSum1 = new DoubleSum
+    val doubleSum2 = new DoubleSum
+
+    val c = DataUtils.loadStreamTable(spark, "customer", "c")
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
+    val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+      .groupBy("l_orderkey")
+      .agg(doubleSum1($"l_quantity").as("sum_quantity"))
+      .select($"l_orderkey".as("agg_orderkey"), $"sum_quantity")
+
+    val result = o.join(agg_l, $"o_orderkey" === $"agg_orderkey")
+      .join(c, $"o_custkey" === $"c_custkey")
+      .groupBy("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
+      .agg(doubleSum2($"sum_quantity"))
+    //  .orderBy(desc("o_totalprice"), $"o_orderdate")
+
+    // result.explain(true)
+    DataUtils.writeToSink(result, query_name)
   }
 }
 

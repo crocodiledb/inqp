@@ -48,8 +48,23 @@ case class WriteToDataSourceV2(writer: DataSourceWriter, query: LogicalPlan) ext
  * The physical plan for writing data into data source v2.
  */
 case class WriteToDataSourceV2Exec(writer: DataSourceWriter, query: SparkPlan) extends SparkPlan {
+  private var processTimeMs: Long = 0L
+  private var startUpTimeMs: Long = 0L
+
   override def children: Seq[SparkPlan] = Seq(query)
   override def output: Seq[Attribute] = Nil
+
+  def getProcessTime(): Long = {
+    processTimeMs
+  }
+
+  def setStartUpTime(startUpTimeMs: Long): Unit = {
+    this.startUpTimeMs = startUpTimeMs
+  }
+
+  def getStartUpTime(): Long = {
+    startUpTimeMs
+  }
 
   override protected def doExecute(): RDD[InternalRow] = {
     val writeTask = writer.createWriterFactory()
@@ -60,6 +75,7 @@ case class WriteToDataSourceV2Exec(writer: DataSourceWriter, query: SparkPlan) e
     logInfo(s"Start processing data source writer: $writer. " +
       s"The input RDD has ${messages.length} partitions.")
 
+    val start = System.nanoTime()
     try {
       sparkContext.runJob(
         rdd,
@@ -71,6 +87,9 @@ case class WriteToDataSourceV2Exec(writer: DataSourceWriter, query: SparkPlan) e
           writer.onDataWriterCommit(message)
         }
       )
+      val end = System.nanoTime()
+      processTimeMs = (end - start)/1000000
+      print(s"execute RDD ${processTimeMs} ms\n")
 
       logInfo(s"Data source writer $writer is committing.")
       writer.commit(messages)

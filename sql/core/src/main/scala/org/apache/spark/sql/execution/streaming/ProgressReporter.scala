@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution.streaming
 
-import java.io.{File, IOException, PrintWriter}
+import java.io.{File, FileWriter, IOException, PrintWriter}
 import java.text.SimpleDateFormat
 import java.util.{Date, NoSuchElementException, UUID}
 
@@ -31,7 +31,7 @@ import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.execution.SlothMetricsTracker
 import org.apache.spark.sql.execution.SlothProgressMetrics
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2ScanExec
+import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExec, WriteToDataSourceV2Exec}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.v2.reader.streaming.MicroBatchReader
 import org.apache.spark.sql.streaming._
@@ -152,11 +152,13 @@ trait ProgressReporter extends Logging {
     var statFile: String = null
     try {
       val dir = slothdbStatDir
-      statFile = dir + "/slothdb.stat"
-      val shuffleNum = sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key)
-      val pw = new PrintWriter(new File(statFile))
-      pw.print(f"${currentBatchId}\t${shuffleNum}\t${totalTimeSec}%.2f\n")
-      pw.close
+      if (dir != null) {
+        statFile = dir + "/slothdb.stat"
+        val shuffleNum = sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key)
+        val pw = new PrintWriter(new FileWriter(statFile, true))
+        pw.print(f"${name}\t${currentBatchId}\t${shuffleNum}\t${totalTimeSec}%.2f\n")
+        pw.close
+      }
     }
     catch {
       case e: NoSuchElementException =>
@@ -166,14 +168,23 @@ trait ProgressReporter extends Logging {
     }
   }
 
+  private def getProcessTime(): Double = {
+    if (lastExecution.executedPlan.isInstanceOf[WriteToDataSourceV2Exec]) {
+      val sink = lastExecution.executedPlan.asInstanceOf[WriteToDataSourceV2Exec]
+      sink.getProcessTime().toDouble - sink.getStartUpTime().toDouble
+    } else {
+      (currentTriggerEndTimestamp - currentTriggerStartTimestamp).toDouble / 1000
+    }
+  }
+
   /** Finalizes the query progress and adds it to list of recent status updates. */
   protected def finishTrigger(hasNewData: Boolean): Unit = {
     assert(currentTriggerStartOffsets != null && currentTriggerEndOffsets != null)
     currentTriggerEndTimestamp = triggerClock.getTimeMillis()
 
     val executionStats = extractExecutionStats(hasNewData)
-    val processingTimeSec =
-      (currentTriggerEndTimestamp - currentTriggerStartTimestamp).toDouble / 1000
+
+    val processingTimeSec = getProcessTime()
 
     val inputTimeSec = if (lastTriggerStartTimestamp >= 0) {
       (currentTriggerStartTimestamp - lastTriggerStartTimestamp).toDouble / 1000
@@ -215,16 +226,16 @@ trait ProgressReporter extends Logging {
       totalTimeSec += processingTimeSec
 
       val slothProgress = new SlothDBProgress(
-      id = id,
-      runId = runId,
-      name = name,
-      timestamp = formatTimestamp(currentTriggerStartTimestamp),
-      batchId = currentBatchId,
-      processTime = processingTimeSec,
-      totalProcessTime = totalTimeSec,
-      operatorProgress = slothExtractOperatorMetrics().toArray,
-      sources = sourceProgress.toArray,
-      sink = sinkProgress)
+        id = id,
+        runId = runId,
+        name = name,
+        timestamp = formatTimestamp(currentTriggerStartTimestamp),
+        batchId = currentBatchId,
+        processTime = processingTimeSec,
+        totalProcessTime = totalTimeSec,
+        operatorProgress = slothExtractOperatorMetrics().toArray,
+        sources = sourceProgress.toArray,
+        sink = sinkProgress)
 
       printf(slothProgress.toString)
     }

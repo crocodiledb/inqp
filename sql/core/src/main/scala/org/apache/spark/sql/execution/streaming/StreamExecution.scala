@@ -113,7 +113,7 @@ abstract class StreamExecution(
   var availableOffsets = new StreamProgress
 
   /** The current batchId or -1 if execution has not yet been initialized. */
-  protected var currentBatchId: Long = -1
+  var currentBatchId: Long = -1
 
   /** Metadata associated with the whole query */
   protected val streamMetadata: StreamMetadata = {

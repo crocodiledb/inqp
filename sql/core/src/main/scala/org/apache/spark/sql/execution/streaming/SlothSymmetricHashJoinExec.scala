@@ -17,10 +17,6 @@
 
 package org.apache.spark.sql.execution.streaming
 
-import java.util.concurrent.TimeUnit.NANOSECONDS
-
-import scala.collection.mutable.ListBuffer
-
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, GenericInternalRow, JoinedRow, Literal, UnsafeProjection, UnsafeRow}
@@ -245,23 +241,50 @@ case class SlothSymmetricHashJoinExec(
     }
 
     val numOutputRows = longMetric("numOutputRows")
-    val leftTimeMs = longMetric("leftTimeMs")
-    val rightTimeMs = longMetric("rightTimeMs")
-    val scanTimeMs = longMetric("scanTimeMs")
     val commitTimeMs = longMetric("commitTimeMs")
     val stateMemory = longMetric("stateMemory")
 
     val joinedRow1 = new JoinedRow
     val joinedRow2 = new JoinedRow
 
-    val postJoinFilter =
-      newPredicate(condition.bothSides.getOrElse(Literal(true)), left.output ++ right.output).eval _
+    val opRtId = new SlothRuntimeOpId(stateInfo.get.operatorId, stateInfo.get.queryRunId)
+    val opRunTime = SlothRuntimeCache.get(opRtId)
+    var hashRunTime: SlothHashJoinRuntime = null
+
+    if (opRunTime == null) {
+      val outputProj = UnsafeProjection.create(output, intermediateOutput)
+      val postJoinFilter =
+        newPredicate(condition.bothSides.
+          getOrElse(Literal(true)), left.output ++ right.output).eval _
+      val leftKeyProj = UnsafeProjection.create(leftKeys, left.output)
+      val leftDeleteKeyProj = UnsafeProjection.create(leftKeys, left.output)
+      val leftStateManager = new SlothHashJoinStateManager(
+        LeftSide, left.output, leftKeys, stateInfo, storeConf, hadoopConfBcast.value.value)
+      val rightKeyProj = UnsafeProjection.create(rightKeys, right.output)
+      val rightDeleteKeyProj = UnsafeProjection.create(rightKeys, right.output)
+
+      val rightStateManager = new SlothHashJoinStateManager(
+        RightSide, right.output, rightKeys, stateInfo, storeConf, hadoopConfBcast.value.value)
+
+      hashRunTime = new SlothHashJoinRuntime(
+        outputProj, postJoinFilter, leftKeyProj, leftDeleteKeyProj, leftStateManager,
+        rightKeyProj, rightDeleteKeyProj, rightStateManager)
+    } else {
+      hashRunTime = opRunTime.asInstanceOf[SlothHashJoinRuntime]
+
+      hashRunTime.leftStateManager.reInit(stateInfo, storeConf, hadoopConfBcast.value.value)
+      hashRunTime.rightStateManager.reInit(stateInfo, storeConf, hadoopConfBcast.value.value)
+    }
+
     val leftSideJoiner = new OneSideHashJoiner(
-      LeftSide, left.output, leftKeys, leftInputIter,
-      condition.leftSideOnly, postJoinFilter, stateWatermarkPredicates.left)
+      LeftSide, left.output, leftKeys, leftInputIter, condition.leftSideOnly,
+      hashRunTime.postFilterFunc, stateWatermarkPredicates.left,
+      hashRunTime.leftKeyProj, hashRunTime.leftDeleteKeyProj, hashRunTime.leftStateManager)
+
     val rightSideJoiner = new OneSideHashJoiner(
-      RightSide, right.output, rightKeys, rightInputIter,
-      condition.rightSideOnly, postJoinFilter, stateWatermarkPredicates.right)
+      RightSide, right.output, rightKeys, rightInputIter, condition.rightSideOnly,
+      hashRunTime.postFilterFunc, stateWatermarkPredicates.right,
+      hashRunTime.rightKeyProj, hashRunTime.rightDeleteKeyProj, hashRunTime.rightStateManager)
 
     //  Join one side input using the other side's buffered/state rows. Here is how it is done.
     //
@@ -272,6 +295,7 @@ case class SlothSymmetricHashJoinExec(
     //    stored left input, and also stores all the right input. It also generates all rows from
     //    matching new left input with new right input, since the new left input has become stored
     //    by that point. This tiny asymmetry is necessary to avoid duplication.
+
     val leftInnerIter = leftSideJoiner.storeAndJoinWithOtherSide(rightSideJoiner,
       (input: InternalRow, matched: InternalRow) => {
         joinedRow1.cleanStates()
@@ -293,36 +317,16 @@ case class SlothSymmetricHashJoinExec(
         joinedRow2.withLeft(matched).withRight(input)
       })
 
-    var startTimeNs: Long = System.nanoTime()
-    def onLeftCompletion: Unit = {
-      val endTimeNs = System.nanoTime
-      leftTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
-      startTimeNs = endTimeNs
-    }
-
-    def onRightCompletion: Unit = {
-      val endTimeNs = System.nanoTime
-      rightTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
-      startTimeNs = endTimeNs
-    }
-
-    val leftIterWithMetrics = CompletionIterator[InternalRow, Iterator[InternalRow]](
-      leftInnerIter, onLeftCompletion)
-
-    val rightIterWithMetrics = CompletionIterator[InternalRow, Iterator[InternalRow]](
-      rightInnerIter, onRightCompletion)
-
-
     // TODO: remove stale state when a window is closed
     val outputIter: Iterator[InternalRow] = joinType match {
       case Inner | LeftSemi =>
-        leftIterWithMetrics ++ rightIterWithMetrics
+        leftInnerIter ++ rightInnerIter
       case LeftOuter | LeftAnti =>
         // Run right iterator first
-        rightIterWithMetrics ++ leftIterWithMetrics
+        rightInnerIter ++ leftInnerIter
       case RightOuter =>
         // Run left iterator first
-        leftIterWithMetrics ++ rightIterWithMetrics
+        leftInnerIter ++ rightInnerIter
       case FullOuter =>
         // Run left iterator first, but does not output tuples with nulls
         // When right iterator finished, scan left state to output tuples with nulls
@@ -335,11 +339,11 @@ case class SlothSymmetricHashJoinExec(
             joinedRow1.setInsert(true)
             joinedRow1.withLeft(kvRow.valueWithCounter.value).withRight(nullRight)
           })
-        leftIterWithMetrics ++ rightIterWithMetrics ++ leftOuterIter
+        leftInnerIter ++ rightInnerIter ++ leftOuterIter
       case _ => throwBadJoinTypeException()
     }
 
-    val outputProjection = UnsafeProjection.create(output, intermediateOutput)
+    val outputProjection = hashRunTime.outputProj
     val outputIterWithMetrics = outputIter.map { row =>
       numOutputRows += 1
       val projectedRow = outputProjection(row)
@@ -350,9 +354,6 @@ case class SlothSymmetricHashJoinExec(
 
     // TODO: we do not consider removing old state now
     def onAllCompletion: Unit = {
-      val endTimeNs = System.nanoTime
-      scanTimeMs.set(math.max(NANOSECONDS.toMillis(endTimeNs - startTimeNs), 0))
-
       // Commit all state changes and update state store metrics
       commitTimeMs += timeTakenMs {
         val leftSideMetrics = leftSideJoiner.commitStateAndGetMetrics()
@@ -360,10 +361,14 @@ case class SlothSymmetricHashJoinExec(
         val combinedMetrics = StateStoreMetrics.combine(Seq(leftSideMetrics, rightSideMetrics))
         stateMemory += combinedMetrics.memoryUsedBytes
       }
+
+      hashRunTime.leftStateManager.purgeState()
+      hashRunTime.rightStateManager.purgeState()
+      SlothRuntimeCache.put(opRtId, hashRunTime)
     }
 
     CompletionIterator[InternalRow, Iterator[InternalRow]](
-      outputIterWithMetrics, onAllCompletion)
+        outputIterWithMetrics, onAllCompletion)
   }
 
   /**
@@ -393,16 +398,16 @@ case class SlothSymmetricHashJoinExec(
       inputIter: Iterator[InternalRow],
       preJoinFilterExpr: Option[Expression],
       postJoinFilter: InternalRow => Boolean,
-      stateWatermarkPredicate: Option[JoinStateWatermarkPredicate]) {
+      stateWatermarkPredicate: Option[JoinStateWatermarkPredicate],
+      keyGenerator: UnsafeProjection,
+      deleteKeyGenerator: UnsafeProjection,
+      stateManager: SlothHashJoinStateManager) {
 
     // Filter the joined rows based on the given condition.
     val preJoinFilter =
       newPredicate(preJoinFilterExpr.getOrElse(Literal(true)), inputAttributes).eval _
 
-    private val joinStateManager = new SlothHashJoinStateManager(
-      joinSide, inputAttributes, joinKeys, stateInfo, storeConf, hadoopConfBcast.value.value)
-    private[this] val keyGenerator = UnsafeProjection.create(joinKeys, inputAttributes)
-    private[this] val deleteKeyGenerator = UnsafeProjection.create(joinKeys, inputAttributes)
+    val joinStateManager = stateManager
 
     private[this] val stateKeyWatermarkPredicateFunc = stateWatermarkPredicate match {
       case Some(JoinStateKeyWatermarkPredicate(expr)) =>
@@ -413,12 +418,12 @@ case class SlothSymmetricHashJoinExec(
         newPredicate(Literal(false), Seq.empty).eval _ // false = do not remove if no predicate
     }
 
-    private[this] val stateValueWatermarkPredicateFunc = stateWatermarkPredicate match {
-      case Some(JoinStateValueWatermarkPredicate(expr)) =>
-        throw new IllegalArgumentException("We do not support watermarks on non-key columns")
-      case _ =>
-        newPredicate(Literal(false), Seq.empty).eval _  // false = do not remove if no predicate
-    }
+    // private[this] val stateValueWatermarkPredicateFunc = stateWatermarkPredicate match {
+    //   case Some(JoinStateValueWatermarkPredicate(expr)) =>
+    //     throw new IllegalArgumentException("We do not support watermarks on non-key columns")
+    //   case _ =>
+    //     newPredicate(Literal(false), Seq.empty).eval _  // false = do not remove if no predicate
+    // }
 
     private[this] var updatedStateRowsCount = 0
 
@@ -857,8 +862,9 @@ case class SlothSymmetricHashJoinExec(
             insertAndUpdateCounter(otherSideJoiner, insertKey, insertRow, rightGenerateRow)
           } else {
             // TODO: We do not consider this case right now
-            throw new IllegalArgumentException("Semi join will not accept updates" +
-              "on non-key columns from right subtree")
+            // throw new IllegalArgumentException("Semi join will not accept updates" +
+            //   "on non-key columns from right subtree")
+            outputIter = Iterator.empty
           }
         } else if (isInsert) {
           // First match, output
@@ -1146,3 +1152,13 @@ case class SlothSymmetricHashJoinExec(
     def numUpdatedStateRows: Long = updatedStateRowsCount
   }
 }
+
+case class SlothHashJoinRuntime (
+  outputProj: UnsafeProjection,
+  postFilterFunc: InternalRow => Boolean,
+  leftKeyProj: UnsafeProjection,
+  leftDeleteKeyProj: UnsafeProjection,
+  leftStateManager: SlothHashJoinStateManager,
+  rightKeyProj: UnsafeProjection,
+  rightDeleteKeyProj: UnsafeProjection,
+  rightStateManager: SlothHashJoinStateManager) extends SlothRuntime {}

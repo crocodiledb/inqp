@@ -27,12 +27,16 @@ import org.apache.spark.sql.functions._
 class JoinTest (bootstrap: String, query: String) {
   DataUtils.bootstrap = bootstrap
 
+  var query_name: String = null
+
   def execQuery(query: String): Unit = {
     val spark = SparkSession.builder()
       .appName("Executing Query " + query)
       .getOrCreate()
 
-    query.toLowerCase match {
+    query_name = query.toLowerCase
+
+    query_name match {
       case "q_innerjoin" =>
         execInnerJoin(spark)
       case "q_leftouterjoin" | "q_rightouterjoin" |
@@ -64,7 +68,7 @@ class JoinTest (bootstrap: String, query: String) {
       o.join(l, $"o_orderkey" === $"l_orderkey")
           .select($"o_orderkey", $"o_orderpriority", $"l_orderkey")
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execOuterJoin(spark: SparkSession): Unit = {
@@ -88,7 +92,7 @@ class JoinTest (bootstrap: String, query: String) {
        o.join(l, $"o_orderkey" === $"l_orderkey", "full_outer")
        .select("o_orderkey", "l_orderkey", "o_orderpriority")
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execSemiAntiJoin(spark: SparkSession): Unit = {
@@ -107,7 +111,7 @@ class JoinTest (bootstrap: String, query: String) {
       o.join(l, $"o_orderkey" === $"l_orderkey", "left_anti")
       .select("o_orderkey", "o_orderpriority")
 
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
   def execThetaJoin(spark: SparkSession): Unit = {
@@ -126,7 +130,7 @@ class JoinTest (bootstrap: String, query: String) {
         .select($"p_partkey", $"p_retailprice")
 
     // result.explain()
-    DataUtils.writeToSink(result)
+    DataUtils.writeToSink(result, query_name)
   }
 
 }

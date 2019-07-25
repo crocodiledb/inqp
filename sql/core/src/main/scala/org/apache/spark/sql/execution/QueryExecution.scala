@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution
 
 import java.nio.charset.StandardCharsets
 import java.sql.{Date, Timestamp}
+import java.util.UUID
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
@@ -31,8 +32,9 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.aggregate.{SlothFinalAggExec, SlothHashAggregateExec}
 import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCommandExec, ShowTablesCommand}
+import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExec, WriteToDataSourceV2Exec}
 import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange, ShuffleExchangeExec}
-import org.apache.spark.sql.execution.streaming.{SlothSymmetricHashJoinExec, SlothThetaJoinExec}
+import org.apache.spark.sql.execution.streaming.{MicroBatchExecution, SlothSymmetricHashJoinExec, SlothThetaJoinExec}
 import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampType, _}
 import org.apache.spark.util.Utils
 
@@ -102,12 +104,20 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
   }
 
   private def findValidNumPartition(plan: SparkPlan): Int = {
-    if (plan.children.isEmpty) {
+    if (plan == null) {
       throw new IllegalArgumentException("Not found valid number of partitions")
     }
+
+    plan match {
+      case scan: DataSourceV2ScanExec =>
+        return scan.partitions.size
+      case _ =>
+    }
+
     if (plan.outputPartitioning.numPartitions != 0) {
       return plan.outputPartitioning.numPartitions
     }
+
     return plan.children.map(child => findValidNumPartition(child)).max
   }
 
@@ -168,8 +178,87 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     }
   }
 
+  private def projEqual(projA: SlothProjectExec, projB: SlothProjectExec): Boolean = {
+    val childA = projA.child.output
+    val childB = projB.child.output
+    val outputA = projA.projectList
+    val outputB = projB.projectList
+
+    return (!childA.zip(childB).exists(pair => !pair._1.semanticEquals(pair._2)) &&
+      !outputA.zip(outputB).exists(pair => !pair._1.semanticEquals(pair._2)))
+  }
+
+  private def findProj(proj: SlothProjectExec, microExec: MicroBatchExecution): Long = {
+    val pair = microExec.projArray.find(pair => projEqual(pair._1, proj))
+    if (pair.isDefined) pair.get._2
+    else -1
+  }
+
+  private def assignProjId(runId: UUID, proj: SlothProjectExec,
+                           microExec: MicroBatchExecution): Unit = {
+    val curProjId = findProj(proj, microExec)
+    // New one, first run
+    if (curProjId == -1 && microExec.currentBatchId < 1) {
+      proj.setID(microExec.projId, runId)
+      microExec.projArray.append(new Tuple2(proj, microExec.projId))
+      microExec.projId = microExec.projId + 1
+    } else {
+      if (curProjId == -1) proj.setID(-1, runId)
+      else proj.setID(curProjId, runId)
+    }
+  }
+
+  private def setAllProjId(runId: UUID, plan: SparkPlan, microExec: MicroBatchExecution): Unit = {
+    if (plan == null) return
+    if (plan.isInstanceOf[SlothProjectExec]) {
+      assignProjId(runId, plan.asInstanceOf[SlothProjectExec], microExec)
+    }
+    plan.children.foreach(plan => setAllProjId(runId, plan, microExec))
+  }
+
+  private def findAgg(plan: SparkPlan): SlothHashAggregateExec = {
+    plan match {
+      case aggPlan: SlothHashAggregateExec =>
+        return aggPlan
+      case _ =>
+        findAgg(plan.children(0))
+    }
+  }
+
+  private def setFinalAggId(plan: SparkPlan): Unit = {
+    if (plan == null) return
+    plan match {
+      case slothFinalAggExec: SlothFinalAggExec =>
+        val stateInfo = findAgg(slothFinalAggExec).stateInfo.get
+        slothFinalAggExec.setId(stateInfo.operatorId + 200, stateInfo.queryRunId)
+      case _ =>
+    }
+    plan.children.foreach(setFinalAggId)
+  }
+
+  private def getPerOpStartUpTime(plan: SparkPlan): Long = {
+    val childCost = plan.children.map(getPerOpStartUpTime).sum
+
+    if (plan.isInstanceOf[SlothHashAggregateExec] ||
+    plan.isInstanceOf[SlothSymmetricHashJoinExec] ||
+    plan.isInstanceOf[SlothThetaJoinExec]) {
+      childCost + 15
+    } else if (plan.isInstanceOf[SlothProjectExec]) {
+      childCost
+    } else childCost
+  }
+
+  private def setStartUpTime(plan: SparkPlan): Unit = {
+    plan match {
+      case sink: WriteToDataSourceV2Exec =>
+       sink.setStartUpTime(getPerOpStartUpTime(sink) + 60)
+      case _ =>
+
+    }
+  }
+
   // Several optimization techniques by SlothDB
-  def slothdbOptimization(): Unit = {
+  def slothdbOptimization(runId: UUID, microExec: MicroBatchExecution): Unit = {
     // SlothDB: Set delta output for the last aggregate
     // TODO: this assumes sort operator, if exists,
     // TODO: is at the end of a query plan preceded by an aggregate
@@ -187,6 +276,15 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
 
     // Output Update
     getUpdateAttributes(executedPlan)
+
+    // Set Proj Id
+    setAllProjId(runId, executedPlan, microExec)
+
+    // Set FinalAgg Id
+    setFinalAggId(executedPlan)
+
+    // Set startup time
+    setStartUpTime(executedPlan)
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be

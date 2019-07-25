@@ -56,7 +56,7 @@ public final class SlothAggResultMap {
   /**
    * A hashmap which maps from opaque bytearray keys to bytearray values.
    */
-  private final BytesToBytesMap map;
+  private BytesToBytesMap map;
 
   /**
    * Re-used pointer to the current aggregation buffer
@@ -77,6 +77,17 @@ public final class SlothAggResultMap {
       }
     }
     return true;
+  }
+
+  public void reInit(TaskContext taskContext,
+                     int initialCapacity,
+                     long pageSizeBytes) {
+    this.map = new BytesToBytesMap(
+      taskContext.taskMemoryManager(), initialCapacity, pageSizeBytes, true);
+  }
+
+  public void purge() {
+    this.map = null;
   }
 
   /**
