@@ -107,7 +107,7 @@ private[state] class SlothDBStateStoreProvider extends StateStoreProvider with L
         state = ABORTED
       }
       // logInfo(s"Aborted version $newVersion for $this")
-     throw new IllegalArgumentException("Aborted version $newVersion for $this")
+     throw new IllegalArgumentException(s"Aborted version ${newVersion} for $this")
     }
 
     /**

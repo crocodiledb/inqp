@@ -17,6 +17,7 @@
 
 package totem.middleground.tpch
 
+import org.apache.spark.sql.avro.SchemaConverters
 import org.apache.spark.sql.types.StructType
 
 object TPCHSchema {
@@ -30,6 +31,7 @@ object TPCHSchema {
   val regionTopics = "Region"
 
   var checkpointLocation = "hdfs://localhost:9000/tpch_checkpoint"
+  var staticTableLocation = "hdfs://localhost:9000/tpch_static"
 
   val supplierSchema = new StructType().add("s_suppkey", "long")
     .add("s_name", "string")
@@ -100,6 +102,15 @@ object TPCHSchema {
     .add("r_name", "string")
     .add("r_comment", "string")
 
+  val avroLineitemSchema = SchemaConverters.toAvroType(lineitemSchema)
+  val avroOrdersSchema = SchemaConverters.toAvroType(ordersSchema)
+  val avroCustomerSchema = SchemaConverters.toAvroType(customerSchema)
+  val avroSupplierSchema = SchemaConverters.toAvroType(supplierSchema)
+  val avroPartSuppSchema = SchemaConverters.toAvroType(partsuppSchema)
+  val avroPartSchema = SchemaConverters.toAvroType(partSchema)
+  val avroNationSchema = SchemaConverters.toAvroType(nationSchema)
+  val avroRegionSchema = SchemaConverters.toAvroType(regionSchema)
+
   var datadir = "/home/totemtang/slothdb/slothdb_testsuite/datadir/tpchdata"
   private def supplierPath = datadir + "/supplier"
   private def partPath = datadir + "/part"
@@ -109,6 +120,10 @@ object TPCHSchema {
   private def lineitemPath = datadir + "/lineitem"
   private def nationPath = datadir  + "/nation"
   private def regionPath = datadir + "/region"
+
+  private def nationStaticPath = staticTableLocation + "/nation.tbl"
+  private def regionStaticPath = staticTableLocation + "/region.tbl"
+  private val Empty_Static = ""
 
   // val nationPath = "hdfs://localhost:9000/tpch_data/nation.tbl"
   // val regionPath = "hdfs://localhost:9000/tpch_data/region.tbl"
@@ -134,35 +149,44 @@ object TPCHSchema {
   def nationOffset: Int = 25
   def regionOffset: Int = 5
 
-  def GetMetaData(tableName: String) : Option[Tuple4[StructType, String, String, Long]] =
+  def GetMetaData(tableName: String):
+  Option[Tuple6[StructType, String, String, String, String, Long]] =
   {
     tableName.toLowerCase match {
       case "part" =>
-        Some((partSchema, partPath, partTopics, partOffset))
+        Some((partSchema, avroPartSchema.toString, partPath, Empty_Static, partTopics, partOffset))
       case "partsupp" =>
-        Some((partsuppSchema, partsuppPath, partsuppTopics, partsuppOffset))
+        Some((partsuppSchema, avroPartSuppSchema.toString,
+          partsuppPath, Empty_Static, partsuppTopics, partsuppOffset))
       case "supplier" =>
-        Some((supplierSchema, supplierPath, supplierTopics, supplierOffset))
+        Some((supplierSchema, avroSupplierSchema.toString,
+          supplierPath, Empty_Static, supplierTopics, supplierOffset))
       case "customer" =>
-        Some((customerSchema, customerPath, customerTopics, customerOffset))
+        Some((customerSchema, avroCustomerSchema.toString,
+          customerPath, Empty_Static, customerTopics, customerOffset))
       case "orders" =>
-        Some((ordersSchema, ordersPath, ordersTopics, ordersOffset))
+        Some((ordersSchema, avroOrdersSchema.toString,
+          ordersPath, Empty_Static, ordersTopics, ordersOffset))
       case "lineitem" =>
-        Some((lineitemSchema, lineitemPath, lineitemTopics, lineitemOffset))
+        Some((lineitemSchema, avroLineitemSchema.toString,
+          lineitemPath, Empty_Static, lineitemTopics, lineitemOffset))
       case "nation" =>
-        Some((nationSchema, nationPath, nationTopics, nationOffset))
+        Some((nationSchema, avroNationSchema.toString, nationPath, nationStaticPath,
+          nationTopics, nationOffset))
       case "region" =>
-        Some((regionSchema, regionPath, regionTopics, regionOffset))
+        Some((regionSchema, avroRegionSchema.toString, regionPath, regionStaticPath,
+          regionTopics, regionOffset))
       case _ =>
         printf("Unrecoganized Table %s\n", tableName)
         throw new Exception("Unrecoganized Table")
     }
   }
 
-  def setQueryMetaData(numBatch: Int, SF: Double, checkpoint: String): Unit = {
+  def setQueryMetaData(numBatch: Int, SF: Double, hdfsRoot: String): Unit = {
     numMiniBatch = numBatch
     scaleFactor = SF
-    checkpointLocation = checkpoint
+    checkpointLocation = hdfsRoot + "/tpch_checkpoint"
+    staticTableLocation = hdfsRoot + "/tpch_static"
   }
 
 }

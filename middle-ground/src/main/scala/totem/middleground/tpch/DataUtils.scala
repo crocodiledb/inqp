@@ -20,6 +20,7 @@ package totem.middleground.tpch
 import java.util.concurrent.TimeUnit
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.avro.from_avro
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.Trigger
 
@@ -30,9 +31,8 @@ object DataUtils {
   def loadStreamTable(spark: SparkSession,
                       tableName: String,
                       alias: String): DataFrame = {
-    val (schema, _, topics, offsetPerTrigger) = TPCHSchema.GetMetaData(tableName).get
+    val (_, avroSchema, _, _, topics, offsetPerTrigger) = TPCHSchema.GetMetaData(tableName).get
 
-    val ts_col = alias + "_ts"
     return spark
       .readStream
       .format("kafka")
@@ -40,22 +40,19 @@ object DataUtils {
       .option("subscribe", topics)
       .option("startingOffsets", "earliest")
       .option("maxOffsetsPerTrigger", offsetPerTrigger)
-      .load().select(from_json(col("value").
-        cast("string"), schema).as(alias), col("timestamp").as(ts_col))
-      .selectExpr(alias + ".*", ts_col)
-      .withWatermark(ts_col, "10 seconds")
-
+      .load().select(from_avro(col("value"), avroSchema).as(alias))
+      .selectExpr(alias + ".*")
   }
 
   def loadStaticTable(spark: SparkSession, tableName: String, alias: String): DataFrame = {
-    val (schema, path, _, _) = TPCHSchema.GetMetaData(tableName).get
+    val (schema, _, _, staticPath, _, _) = TPCHSchema.GetMetaData(tableName).get
 
     return spark
       .read
       .format("csv")
       .option("sep", "|")
       .schema(schema)
-      .load(path)
+      .load(staticPath)
   }
 
   def writeToSink(query_result: DataFrame, query_name: String): Unit = {

@@ -20,9 +20,8 @@ package totem.middleground.kafka
 
 // import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.streaming.Trigger
-
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.streaming.Trigger
 
 class Query (bootstrap: String)
 {

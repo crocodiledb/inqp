@@ -34,7 +34,7 @@ import org.apache.spark.sql.execution.aggregate.{SlothFinalAggExec, SlothHashAgg
 import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCommandExec, ShowTablesCommand}
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExec, WriteToDataSourceV2Exec}
 import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange, ShuffleExchangeExec}
-import org.apache.spark.sql.execution.streaming.{MicroBatchExecution, SlothSymmetricHashJoinExec, SlothThetaJoinExec}
+import org.apache.spark.sql.execution.streaming.{MicroBatchExecution, SlothSimpleHashJoinExec, SlothSymmetricHashJoinExec, SlothThetaJoinExec}
 import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampType, _}
 import org.apache.spark.util.Utils
 
@@ -257,6 +257,16 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     }
   }
 
+  private def setFirstBatch(plan: SparkPlan, isFirstBatch: Boolean): Unit = {
+    if (plan == null) return
+    plan match {
+      case simpleJoin: SlothSimpleHashJoinExec =>
+        simpleJoin.setIsFirstBatch(isFirstBatch)
+      case _ =>
+    }
+    plan.children.foreach(child => setFirstBatch(child, isFirstBatch))
+  }
+
   // Several optimization techniques by SlothDB
   def slothdbOptimization(runId: UUID, microExec: MicroBatchExecution): Unit = {
     // SlothDB: Set delta output for the last aggregate
@@ -285,6 +295,9 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
 
     // Set startup time
     setStartUpTime(executedPlan)
+
+    // Set isFirstBatch for Static Tables
+    setFirstBatch(executedPlan, microExec.currentBatchId == 0)
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be

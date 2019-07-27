@@ -24,11 +24,11 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
 
 class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
-                 shuffleNum: String, statDIR: String, SF: Double, checkpoint: String)
+                 shuffleNum: String, statDIR: String, SF: Double, hdfsRoot: String)
 {
 
   DataUtils.bootstrap = bootstrap
-  TPCHSchema.setQueryMetaData(numBatch, SF, checkpoint)
+  TPCHSchema.setQueryMetaData(numBatch, SF, hdfsRoot)
 
   private var query_name: String = null
 
@@ -91,8 +91,10 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
         execQ22(spark)
       case "q_highbalance" =>
         execHighBalance(spark)
-      case "q18_a" =>
-        execQ18_a(spark)
+      case "q_scan" =>
+        execScan(spark)
+      case "q_static" =>
+        execStatic(spark)
       case _ =>
         printf("Not yet supported %s", query)
     }
@@ -113,7 +115,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
 
     val result = l.filter($"l_shipdate" <= "1998-09-01")
-      .select($"l_ts", $"l_returnflag", $"l_linestatus",
+      .select($"l_returnflag", $"l_linestatus",
         $"l_quantity", $"l_extendedprice", $"l_discount", $"l_tax")
       .groupBy($"l_returnflag", $"l_linestatus")
       .agg(
@@ -587,8 +589,8 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val p = DataUtils.loadStreamTable(spark, "part", "p")
       .filter($"p_brand" === "Brand#23" and $"p_container" === "MED BOX")
 
-    val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
-      .groupBy($"l_partkey")
+    // val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+    val agg_l = l.groupBy($"l_partkey")
       .agg(
         (doubleAvg($"l_quantity") * 0.2).as("avg_quantity"))
       .select($"l_partkey".as("agg_l_partkey"), $"avg_quantity")
@@ -615,7 +617,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
       .groupBy("l_orderkey")
       .agg(doubleSum1($"l_quantity").as("sum_quantity"))
-      .filter($"sum_quantity" > 312)
+      .filter($"sum_quantity" > 300)
       .select($"l_orderkey".as("agg_orderkey"))
 
     val result = o.join(agg_l, $"o_orderkey" === $"agg_orderkey", "left_semi")
@@ -781,27 +783,34 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     DataUtils.writeToSink(result, query_name)
   }
 
-  def execQ18_a(spark: SparkSession): Unit = {
+  def execScan(spark: SparkSession): Unit = {
     import spark.implicits._
 
-    val doubleSum1 = new DoubleSum
-    val doubleSum2 = new DoubleSum
+    val result = DataUtils.loadStreamTable(spark, "lineitem", "l")
+      .filter($"l_shipdate" === "2000-09-01")
 
-    val c = DataUtils.loadStreamTable(spark, "customer", "c")
-    val o = DataUtils.loadStreamTable(spark, "orders", "o")
-    val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
-      .groupBy("l_orderkey")
-      .agg(doubleSum1($"l_quantity").as("sum_quantity"))
-      .select($"l_orderkey".as("agg_orderkey"), $"sum_quantity")
-
-    val result = o.join(agg_l, $"o_orderkey" === $"agg_orderkey")
-      .join(c, $"o_custkey" === $"c_custkey")
-      .groupBy("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
-      .agg(doubleSum2($"sum_quantity"))
-    //  .orderBy(desc("o_totalprice"), $"o_orderdate")
-
-    // result.explain(true)
     DataUtils.writeToSink(result, query_name)
+  }
+
+  def execStatic(spark: SparkSession): Unit = {
+    import spark.implicits._
+
+    val s = DataUtils.loadStreamTable(spark, "supplier", "s")
+    val r = DataUtils.loadStaticTable(spark, "region", "r")
+    val n = DataUtils.loadStaticTable(spark, "nation", "n")
+    val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
+
+    val result = r.join(n, $"r_regionkey" === $"n_regionkey")
+      .join(s, $"n_nationkey" === $"s_nationkey")
+      .join(ps, $"s_suppkey" === $"ps_suppkey")
+      .groupBy($"ps_partkey")
+      .agg(
+        min($"ps_supplycost").as("min_supplycost"))
+      .select($"ps_partkey".as("min_partkey"), $"min_supplycost")
+
+    result.explain()
+    // DataUtils.writeToSink(result, "q_static")
+
   }
 }
 
@@ -810,7 +819,7 @@ object QueryTPCH {
 
     if (args.length < 7) {
       System.err.println("Usage: QueryTPCH <bootstrap-servers> <query>" +
-        "<numBatch> <number-shuffle-partition> <statistics dir> <SF> <Checkpoint>")
+        "<numBatch> <number-shuffle-partition> <statistics dir> <SF> <HDFS root>")
       System.exit(1)
     }
 

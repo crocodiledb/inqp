@@ -248,79 +248,46 @@ class SlothThetaJoinStateManager (
     private val longToUnsafeRow = UnsafeProjection.create(longValueSchema)
     private val valueRow = longToUnsafeRow(new SpecificInternalRow(longValueSchema))
     protected var stateStore: StateStore = getStateStore(keySchema, longValueSchema)
-    private var loadedStore = false
-
-    private var hashMap: HashMap[UnsafeRow, Long] = HashMap.empty[UnsafeRow, Long]
 
     /** Get the number of values the key has */
     def get(key: UnsafeRow): Long = {
-      val longValueRow = hashMap.get(key)
-      if (longValueRow.isDefined) longValueRow.get
-      else {
-        val value = stateStore.get(key)
-        if (value == null) 0L
-        else {
-          val count = value.getLong(0)
-          hashMap.put(key.copy(), count)
-          count
-        }
-      }
+      val value = stateStore.get(key)
+      if (value == null) 0L
+      else value.getLong(0)
     }
 
     /** Set the number of values the key has */
     def put(key: UnsafeRow, numValues: Long): Unit = {
       require(numValues > 0)
-      if (hashMap.contains(key)) {
-        hashMap(key) = numValues
+      val value = stateStore.get(key)
+      if (value == null) {
+        valueRow.setLong(0, numValues)
+        stateStore.put(key, valueRow)
       } else {
-        hashMap.put(key.copy(), numValues)
+        value.setLong(0, numValues)
       }
     }
 
     def remove(key: UnsafeRow): Unit = {
-      hashMap.remove(key)
       stateStore.remove(key)
     }
 
-    private def loadStore(): Unit = {
-      loadedStore = true
-      stateStore.getRange(None, None).foreach(pair => {
-        val key = pair.key
-        val count = pair.value.getLong(0)
-        if (!hashMap.contains(key)) hashMap.put(key.copy(), count)
-      })
-    }
-
     def getIterator(): Iterator[KeyAndNumValues] = {
-      if (!loadedStore) loadStore()
-
-      val keyAndNumValues = KeyAndNumValues()
-      hashMap.iterator.map(pair => {
-        keyAndNumValues.withNew(pair._1, pair._2)
-      })
-    }
-
-    private def saveToStateStore(): Unit = {
-      hashMap.iterator.foreach(pair => {
-        val key = pair._1
-        valueRow.setLong(0, pair._2)
-        stateStore.put(key, valueRow)
-      })
+      val keyNumVal = new KeyAndNumValues()
+      stateStore.getRange(None, None).map(pair =>
+        keyNumVal.withNew(pair.key, pair.value.getLong(0))
+      )
     }
 
     override def commit(): Unit = {
-      saveToStateStore()
       super.commit()
     }
 
     def reInit(): Unit = {
       stateStore = getStateStore(keySchema, longValueSchema)
-      hashMap = HashMap.empty[UnsafeRow, Long]
-      loadedStore = false
     }
 
     def purgeState(): Unit = {
-      hashMap = null
     }
   }
 

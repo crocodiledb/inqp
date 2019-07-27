@@ -19,6 +19,8 @@
 package totem.middleground.tpch
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.avro.to_avro
+import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.StructType
 
 class LoadTPCH (bootstrap: String, data_root_dir: String, checkpoint: String) {
@@ -38,7 +40,7 @@ class LoadTPCH (bootstrap: String, data_root_dir: String, checkpoint: String) {
         .schema(schema)
         .load(path)
 
-    val query = rows.selectExpr("to_json(struct(*)) as value")
+    val query = rows.select(to_avro(struct("*")) as "value")
       .writeStream
       .format("kafka")
       .option("topic", topics)
@@ -52,7 +54,7 @@ class LoadTPCH (bootstrap: String, data_root_dir: String, checkpoint: String) {
   def loadTable(tableName: String): Unit =
   {
     TPCHSchema.GetMetaData(tableName) match {
-      case Some((schema, path, topics, _)) if schema != null && topics != null =>
+      case Some((schema, _, path, _, topics, _)) if schema != null && topics != null =>
         loadOneTable(tableName, schema, path, topics)
       case _ =>
         return

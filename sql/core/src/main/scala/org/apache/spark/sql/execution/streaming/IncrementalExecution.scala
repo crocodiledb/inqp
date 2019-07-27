@@ -164,6 +164,16 @@ class IncrementalExecution(
               slothJoin.leftKeys, slothJoin.rightKeys,
               slothJoin.condition.full, Some(offsetSeqMetadata.batchWatermarkMs)))
 
+      case simpleJoin: SlothSimpleHashJoinExec =>
+        simpleJoin.copy(
+          stateInfo = Some(nextStatefulOperationStateInfo),
+          eventTimeWatermark = Some(offsetSeqMetadata.batchWatermarkMs),
+          stateWatermarkPredicates =
+            StreamingSymmetricHashJoinHelper.getStateWatermarkPredicates(
+              simpleJoin.left.output, simpleJoin.right.output,
+              simpleJoin.leftKeys, simpleJoin.rightKeys,
+              simpleJoin.condition.full, Some(offsetSeqMetadata.batchWatermarkMs)))
+
       case slothThetaJoin: SlothThetaJoinExec =>
         slothThetaJoin.copy(
            stateInfo = Some(nextStatefulOperationStateInfo),

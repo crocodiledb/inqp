@@ -32,9 +32,9 @@ import org.apache.spark.util.NextIterator
 
 case class KeyWithIndexAndValueWithCounter(
   var key: UnsafeRow = null, var valueIndex: Long = -1,
-  var valueWithCounter: ValueWithCounter = null) {
+  var valueWithCounter: UnsafeRow = null) {
   def withNew(newKey: UnsafeRow, newIndex: Long,
-              newValueWithCounter: ValueWithCounter): this.type = {
+              newValueWithCounter: UnsafeRow): this.type = {
     this.key = newKey
     this.valueIndex = newIndex
     this.valueWithCounter = newValueWithCounter
@@ -42,18 +42,18 @@ case class KeyWithIndexAndValueWithCounter(
   }
 }
 
-case class ValueWithCounter(var value: UnsafeRow = null, var counter: Int = 0) {
-  def withNew(newValue: UnsafeRow, newCounter: Int): this.type = {
-    this.value = newValue
-    this.counter = newCounter
-    this
-  }
-
-  def getCounter: Int = counter
-  def incCounter: Unit = {counter += 1}
-  def decCounter: Unit = {counter -= 1}
-  def getValue: UnsafeRow = value
-}
+// case class ValueWithCounter(var value: UnsafeRow = null, var counter: Int = 0) {
+//   def withNew(newValue: UnsafeRow, newCounter: Int): this.type = {
+//     this.value = newValue
+//     this.counter = newCounter
+//     this
+//   }
+//
+//   def getCounter: Int = counter
+//   def incCounter: Unit = {counter += 1}
+//   def decCounter: Unit = {counter -= 1}
+//   def getValue: UnsafeRow = value
+// }
 
 /**
  * Helper class to manage state required by a single side of [[StreamingSymmetricHashJoinExec]].
@@ -117,21 +117,21 @@ class SlothHashJoinStateManager (
    */
 
   /** Get all the values of a key */
-  def getAll(key: UnsafeRow): Iterator[ValueWithCounter] = {
+  def getAll(key: UnsafeRow): Iterator[UnsafeRow] = {
     val numValues = keyToNumValues.get(key)
     keyWithIndexToValue.getAll(key, numValues).map(_.valueWithCounter)
   }
 
-  def get(key: UnsafeRow, value: UnsafeRow): ValueWithCounter = {
+  def get(key: UnsafeRow, value: UnsafeRow): UnsafeRow = {
     val numValues = keyToNumValues.get(key)
     val kvRow = keyWithIndexToValue.getAll(key, numValues).find(kvRow =>
-      kvRow.valueWithCounter.value.equals(value))
+      keyWithIndexToValue.equalWithoutCounter(kvRow.valueWithCounter, value))
     if (kvRow.isDefined) kvRow.get.valueWithCounter
     else null
   }
 
   /** Get the most recent row that is just inserted */
-  def getMostRecent(key: UnsafeRow): ValueWithCounter = {
+  def getMostRecent(key: UnsafeRow): UnsafeRow = {
     val numExistingValues = keyToNumValues.get(key)
     require(numExistingValues > 0,
       "getting the most recent one " +
@@ -149,7 +149,7 @@ class SlothHashJoinStateManager (
   def remove(key: UnsafeRow, value: UnsafeRow): Unit = {
     val numValues = keyToNumValues.get(key)
     val kvRow = keyWithIndexToValue.getAll(key, numValues).find(kvRow =>
-      kvRow.valueWithCounter.value.equals(value))
+      keyWithIndexToValue.equalWithoutCounter(kvRow.valueWithCounter, value))
     require(kvRow.isDefined, "We must find the KV when removing a record from the state")
 
     keyWithIndexToValue.remove(key, kvRow.get.valueIndex)
@@ -312,79 +312,46 @@ class SlothHashJoinStateManager (
     private val longToUnsafeRow = UnsafeProjection.create(longValueSchema)
     private val valueRow = longToUnsafeRow(new SpecificInternalRow(longValueSchema))
     protected var stateStore: StateStore = getStateStore(keySchema, longValueSchema)
-    private var loadedStore = false
-
-    private var hashMap: HashMap[UnsafeRow, Long] = HashMap.empty[UnsafeRow, Long]
 
     /** Get the number of values the key has */
     def get(key: UnsafeRow): Long = {
-      val longValueRow = hashMap.get(key)
-      if (longValueRow.isDefined) longValueRow.get
-      else {
-        val value = stateStore.get(key)
-        if (value == null) 0L
-        else {
-          val count = value.getLong(0)
-          hashMap.put(key.copy(), count)
-          count
-        }
-      }
+      val value = stateStore.get(key)
+      if (value == null) 0L
+      else value.getLong(0)
     }
 
     /** Set the number of values the key has */
     def put(key: UnsafeRow, numValues: Long): Unit = {
       require(numValues > 0)
-      if (hashMap.contains(key)) {
-        hashMap(key) = numValues
+      val value = stateStore.get(key)
+      if (value == null) {
+        valueRow.setLong(0, numValues)
+        stateStore.put(key, valueRow)
       } else {
-        hashMap.put(key.copy(), numValues)
+        value.setLong(0, numValues)
       }
     }
 
     def remove(key: UnsafeRow): Unit = {
-      hashMap.remove(key)
       stateStore.remove(key)
     }
 
-    private def loadStore(): Unit = {
-      loadedStore = true
-      stateStore.getRange(None, None).foreach(pair => {
-        val key = pair.key
-        val count = pair.value.getLong(0)
-        if (!hashMap.contains(key)) hashMap.put(key.copy(), count)
-      })
-    }
-
     def getIterator(): Iterator[KeyAndNumValues] = {
-      if (!loadedStore) loadStore()
-
-      val keyAndNumValues = KeyAndNumValues()
-      hashMap.iterator.map(pair => {
-        keyAndNumValues.withNew(pair._1, pair._2)
-      })
-    }
-
-    private def saveToStateStore(): Unit = {
-      hashMap.iterator.foreach(pair => {
-        val key = pair._1
-        valueRow.setLong(0, pair._2)
-        stateStore.put(key, valueRow)
-      })
+      val keyNumVal = new KeyAndNumValues()
+      stateStore.getRange(None, None).map(pair =>
+        keyNumVal.withNew(pair.key, pair.value.getLong(0))
+      )
     }
 
     override def commit(): Unit = {
-      saveToStateStore()
       super.commit()
     }
 
     def reInit(): Unit = {
       stateStore = getStateStore(keySchema, longValueSchema)
-      hashMap = HashMap.empty[UnsafeRow, Long]
-      loadedStore = false
     }
 
     def purgeState(): Unit = {
-      hashMap = null
     }
   }
 
@@ -412,27 +379,9 @@ class SlothHashJoinStateManager (
 
     protected var stateStore = getStateStore(keyWithIndexSchema, valueWithCounterSchema)
 
-    private var hashMap = HashMap.empty[UnsafeRow, ValueWithCounter]
-
-    private def parseValueRow(value: UnsafeRow): ValueWithCounter = {
-      val valueRow = valueRowGenerator(value)
-      val counter = value.getInt(indexOrdinalInValueWithCounterRow)
-      ValueWithCounter(valueRow.copy(), counter)
-    }
-
-    def get(key: UnsafeRow, valueIndex: Long): ValueWithCounter = {
+    def get(key: UnsafeRow, valueIndex: Long): UnsafeRow = {
       val keyWithIndex = keyWithIndexRow(key, valueIndex)
-      val optionValue = hashMap.get(keyWithIndex)
-      if (optionValue.isDefined) optionValue.get
-      else {
-        val rawValueWithCounter = stateStore.get(keyWithIndex)
-        if (rawValueWithCounter == null) null
-        else {
-          val valueWithCounter = parseValueRow(rawValueWithCounter)
-          hashMap.put(keyWithIndex.copy(), valueWithCounter)
-          valueWithCounter
-        }
-      }
+      stateStore.get(keyWithIndex)
     }
 
     /**
@@ -461,9 +410,9 @@ class SlothHashJoinStateManager (
 
     /** Put new value for key at the given index */
     def put(key: UnsafeRow, valueIndex: Long, value: UnsafeRow): Unit = {
-      val keyWithIndex = keyWithIndexRow(key, valueIndex).copy()
-      val valueWithCounter = ValueWithCounter(value.copy())
-      hashMap += (keyWithIndex -> valueWithCounter)
+      val keyWithIndex = keyWithIndexRow(key, valueIndex)
+      val valueWithCounter = valueWithCounterRow(value, 0)
+      stateStore.put(keyWithIndex, valueWithCounter)
     }
 
     /**
@@ -472,7 +421,6 @@ class SlothHashJoinStateManager (
      */
     def remove(key: UnsafeRow, valueIndex: Long): Unit = {
       val keyWithIndex = keyWithIndexRow(key, valueIndex)
-      hashMap.remove(keyWithIndex)
       stateStore.remove(keyWithIndex)
     }
 
@@ -485,28 +433,9 @@ class SlothHashJoinStateManager (
       }
     }
 
-    private def saveToStateStore(): Unit = {
-      hashMap.iterator.foreach{pair => {
-        val keyWithIndex = pair._1
-        val valueWithCounter = pair._2
-        val valueRow = valueWithCounterRow(valueWithCounter.value, valueWithCounter.counter)
-        stateStore.put(keyWithIndex, valueRow)
-      }}
-    }
-
     override def commit(): Unit = {
-      saveToStateStore()
       super.commit()
     }
-
-    // def iterator: Iterator[KeyWithIndexAndValueWithCounter] = {
-    //   val keyWithIndexAndValueWithCounter = new KeyWithIndexAndValueWithCounter()
-    //   stateStore.getRange(None, None).map { pair =>
-    //     keyWithIndexAndValue.withNew(
-    //       keyRowGenerator(pair.key), pair.key.getLong(indexOrdinalInKeyWithIndexRow), pair.value)
-    //     keyWithIndexAndValue
-    //   }
-    // }
 
     /** Generated a row using the key and index */
     private def keyWithIndexRow(key: UnsafeRow, valueIndex: Long): UnsafeRow = {
@@ -523,11 +452,15 @@ class SlothHashJoinStateManager (
 
     def reInit(): Unit = {
       stateStore = getStateStore(keyWithIndexSchema, valueWithCounterSchema)
-      hashMap = HashMap.empty[UnsafeRow, ValueWithCounter]
     }
 
     def purgeState(): Unit = {
-      hashMap = null
+    }
+
+    def equalWithoutCounter (valueWithCounter: UnsafeRow,
+                             valueWithoutCounter: UnsafeRow): Boolean = {
+      val row = valueRowGenerator(valueWithCounter)
+      row.equals(valueWithoutCounter)
     }
   }
 }

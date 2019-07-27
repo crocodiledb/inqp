@@ -397,7 +397,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           if (SlothDBContext.enable_slothdb) {
             if (joinType != Cross) {
               new SlothSymmetricHashJoinExec(
-                leftKeys, rightKeys, joinType, condition, planLater(left), planLater(right)) :: Nil
+                leftKeys, rightKeys, joinType, condition,
+                planLater(left), planLater(right)) :: Nil
             }
             else {
               new SlothThetaJoinExec(
@@ -408,6 +409,16 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
             new StreamingSymmetricHashJoinExec(
               leftKeys, rightKeys, joinType, condition, planLater(left), planLater(right)) :: Nil
           }
+
+        case ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, condition, left, right)
+          if SlothDBContext.enable_slothdb && (!left.isStreaming || !right.isStreaming) =>
+
+          var keepLeft: Boolean = true
+          if (!right.isStreaming) keepLeft = false
+
+          new SlothSimpleHashJoinExec(
+            leftKeys, rightKeys, joinType, condition, keepLeft,
+            planLater(left), planLater(right)) :: Nil
 
         case Join(left, right, joinType, condition) if left.isStreaming && right.isStreaming =>
 
