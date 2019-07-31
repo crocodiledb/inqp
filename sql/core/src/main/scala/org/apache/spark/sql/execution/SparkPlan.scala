@@ -123,6 +123,8 @@ abstract class SparkPlan extends QueryPlan[SparkPlan] with Logging with Serializ
 
   def setUpdateOutput(updateOutput: Boolean): Unit = {}
 
+  def setRepairMode(repairMode: Boolean): Unit = {}
+
   /**
    * Returns the result of this query as an RDD[InternalRow] by delegating to `doExecute` after
    * preparations.

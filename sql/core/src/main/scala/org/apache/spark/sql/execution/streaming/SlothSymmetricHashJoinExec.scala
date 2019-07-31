@@ -161,9 +161,8 @@ case class SlothSymmetricHashJoinExec(
 
   override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-    "leftTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "left join time"),
-    "rightTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "right join time"),
-    "scanTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "scan time"),
+    "deleteRows" -> SQLMetrics.createMetric(sparkContext, "number of deletes output"),
+    "updateRows" -> SQLMetrics.createMetric(sparkContext, "number of updates output"),
     "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"),
     "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory")
   )
@@ -242,6 +241,8 @@ case class SlothSymmetricHashJoinExec(
     }
 
     val numOutputRows = longMetric("numOutputRows")
+    val deleteRows = longMetric("deleteRows")
+    val updateRows = longMetric("updateRows")
     val commitTimeMs = longMetric("commitTimeMs")
     val stateMemory = longMetric("stateMemory")
 
@@ -353,6 +354,8 @@ case class SlothSymmetricHashJoinExec(
     val outputProjection = hashRunTime.outputProj
     val outputIterWithMetrics = outputIter.map { row =>
       numOutputRows += 1
+      if (row.isUpdate) updateRows += 2
+      else if (!row.isInsert) deleteRows += 1
       val projectedRow = outputProjection(row)
       projectedRow.setInsert(row.isInsert)
       projectedRow.setUpdate(row.isUpdate && updateOutput)

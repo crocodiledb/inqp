@@ -150,6 +150,11 @@ object SQLConf {
     }
   }
 
+  val SLOTHDB_ENABLE_INCREMENTABILITY = buildConf("spark.sql.slothdb.incrementability")
+    .doc("Whether we execute in an incrementability-away way")
+    .booleanConf
+    .createOptional
+
   val SLOTHDB_STAT_DIR = buildConf("spark.sql.slothdb.stat.dir")
     .doc("A directory for statistics of SlothDB")
     .stringConf

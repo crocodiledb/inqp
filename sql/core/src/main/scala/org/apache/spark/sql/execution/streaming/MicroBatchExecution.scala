@@ -67,6 +67,7 @@ class MicroBatchExecution(
   // SlothDB: Adding Projection Id
   val projArray = new mutable.ArrayBuffer[Tuple2[SlothProjectExec, Long]]()
   var projId = 100
+  var isLastBatch: Boolean = _
 
   override lazy val logicalPlan: LogicalPlan = {
     assert(queryExecutionThread eq Thread.currentThread,
@@ -370,6 +371,15 @@ class MicroBatchExecution(
         (s, Option(currentOffset))
     }.toMap
     availableOffsets ++= latestOffsets.filter { case (_, o) => o.nonEmpty }.mapValues(_.get)
+
+    isLastBatch = !uniqueSources.exists(s =>
+      s match {
+        case reader: MicroBatchReader =>
+          reader.hasMoreData
+        case _ =>
+          true
+      }
+    )
 
     // Update the query metadata
     offsetSeqMetadata = offsetSeqMetadata.copy(

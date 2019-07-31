@@ -58,6 +58,8 @@ case class SlothHashAggregateExec (
 
   override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "deleteRows" -> SQLMetrics.createMetric(sparkContext, "number of deletes"),
+    "updateRows" -> SQLMetrics.createMetric(sparkContext, "number of updates output"),
     "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory"),
     "aggTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "aggregate time"),
     "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"))
@@ -98,6 +100,8 @@ case class SlothHashAggregateExec (
 
     child.execute().mapPartitionsWithIndex { (partIndex, iter) =>
       val numOutputRows = longMetric("numOutputRows")
+      val deleteRows = longMetric("deleteRows")
+      val updateRows = longMetric("updateRows")
       val aggTimeMs = longMetric("aggTimeMs")
       val stateMemory = longMetric("stateMemory")
 
@@ -114,6 +118,8 @@ case class SlothHashAggregateExec (
           child.output,
           iter,
           numOutputRows,
+          deleteRows,
+          updateRows,
           stateMemory,
           stateInfo,
           storeConf,
@@ -121,7 +127,8 @@ case class SlothHashAggregateExec (
           watermarkPredicateForKeys,
           watermarkPredicateForData,
           deltaOutput,
-          updateOutput)
+          updateOutput,
+          repairMode)
       aggIter = resIter
       aggTimeMs += (System.nanoTime() - beforeAgg) / 1000000
       CompletionIterator[InternalRow, Iterator[InternalRow]](resIter, onCompletion)
@@ -133,10 +140,13 @@ case class SlothHashAggregateExec (
 
   private[this] var deltaOutput: Boolean = true
   private[this] var updateOutput: Boolean = true
+  private[this] var repairMode: Boolean = true
 
   override def setDeltaOutput(isDeltaOutput: Boolean): Unit = {deltaOutput = isDeltaOutput}
 
   override def setUpdateOutput(isUpdateOutput: Boolean): Unit = {updateOutput = isUpdateOutput}
+
+  override def setRepairMode(isRepairMode: Boolean): Unit = {repairMode = isRepairMode}
 
   override def verboseString: String = toString(verbose = true)
 

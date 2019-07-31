@@ -37,12 +37,25 @@ class SlothAggResultStore(
 
   private val keySchema = StructType(groupExpressions.zipWithIndex.map {
       case (k, i) => StructField(s"field$i", k.dataType, k.nullable)})
+  private val keySchemaWithFlag = keySchema.add("is new", "boolean")
+
+  private val keyAttributes = keySchema.toAttributes
+  private val keyAttributesWithFlag = keyAttributes :+ Literal(true)
+
+  private val groupKeyWithFlagProj =
+    UnsafeProjection.create(keyAttributesWithFlag, keyAttributes)
+  private val groupKeyProj = UnsafeProjection
+    .create(keyAttributes, keyAttributes :+ AttributeReference("index", BooleanType)())
+
+  private val flagIndex = keySchema.size
+  private val OLD = false
+  private val NEW = true
 
   private val valSchema = aggBufferAttributes.toStructType
 
   private val storeName = "GroupKeyToResultDataStore"
 
-  private var stateStore = getStateStore(keySchema, valSchema)
+  private var stateStore = getStateStore(keySchemaWithFlag, valSchema)
 
   def reInit(stateInfo: Option[StatefulOperatorStateInfo],
              storeConf: StateStoreConf,
@@ -50,38 +63,58 @@ class SlothAggResultStore(
     this.stateInfo = stateInfo
     this.storeConf = storeConf
     this.hadoopConf = hadoopConf
-    stateStore = getStateStore(keySchema, valSchema)
+    stateStore = getStateStore(keySchemaWithFlag, valSchema)
   }
 
   def purge(): Unit = {
 
   }
 
-  def get(groupKey: UnsafeRow): UnsafeRow = {
-    stateStore.get(groupKey)
+  def getOld(groupKey: UnsafeRow): UnsafeRow = {
+    val keyWithFlag = groupKeyWithFlagProj(groupKey)
+    keyWithFlag.setBoolean(flagIndex, OLD)
+    stateStore.get(keyWithFlag)
   }
 
-  def put(groupKey: UnsafeRow, buffer: UnsafeRow): Unit = {
-    stateStore.put(groupKey, buffer)
+  def getNew(groupKey: UnsafeRow): UnsafeRow = {
+    val keyWithFlag = groupKeyWithFlagProj(groupKey)
+    keyWithFlag.setBoolean(flagIndex, NEW)
+    stateStore.get(keyWithFlag)
+  }
+
+  def putOld(groupKey: UnsafeRow, buffer: UnsafeRow): Unit = {
+    val keyWithFlag = groupKeyWithFlagProj(groupKey)
+    keyWithFlag.setBoolean(flagIndex, OLD)
+    stateStore.put(keyWithFlag, buffer)
+  }
+
+  def putNew(groupKey: UnsafeRow, buffer: UnsafeRow): Unit = {
+    val keyWithFlag = groupKeyWithFlagProj(groupKey)
+    keyWithFlag.setBoolean(flagIndex, NEW)
+    stateStore.put(keyWithFlag, buffer)
   }
 
   def remove(groupKey: UnsafeRow): Unit = {
-    stateStore.remove(groupKey)
+    val keyWithFlag = groupKeyWithFlagProj(groupKey)
+
+    keyWithFlag.setBoolean(flagIndex, OLD)
+    stateStore.remove(keyWithFlag)
+
+    keyWithFlag.setBoolean(flagIndex, NEW)
+    stateStore.remove(keyWithFlag)
   }
 
-  def isChanged(key: UnsafeRow): Boolean = {
-    if (key != null) false
-    else true
-  }
-
-  // This is just to simulate the cost of scanning the hash table state
-  // It actually does nothing
-  def scan(): Unit = {
+  def iterator(): Iterator[UnsafeRowPair] = {
+    val rowPair = new UnsafeRowPair()
     stateStore.getRange(None, None)
-      .foreach(rowPair => {
-        if (isChanged(rowPair.key)) {
-          stateStore.remove(rowPair.key)
-        }})
+      .filter(pair => {
+        val keyWithFlag = pair.key
+        keyWithFlag.getBoolean(flagIndex) == NEW
+      })
+      .map(pair => {
+        val groupKey = groupKeyProj(pair.key)
+        rowPair.withRows(groupKey, pair.value)
+      })
   }
 
   def commit(): Unit = {
@@ -105,11 +138,11 @@ class SlothAggResultStore(
     }
   }
 
-  def getNumKeys(): Long = {
+  def getNumKeys: Long = {
     metrics.numKeys
   }
 
-  def getMemoryConsumption(): Long = {
+  def getMemoryConsumption: Long = {
     metrics.memoryUsedBytes
   }
 

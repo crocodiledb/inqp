@@ -72,4 +72,6 @@ public interface MicroBatchReader extends DataSourceReader, BaseStreamingSource 
      * equal to `end` and will only request offsets greater than `end` in the future.
      */
     void commit(Offset end);
+
+    default boolean hasMoreData() { return true;}
 }

@@ -24,11 +24,12 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
 
 class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
-                 shuffleNum: String, statDIR: String, SF: Double, hdfsRoot: String)
+                 shuffleNum: String, statDIR: String, SF: Double,
+                 hdfsRoot: String, incrementability: String, inputPartitions: Int)
 {
 
   DataUtils.bootstrap = bootstrap
-  TPCHSchema.setQueryMetaData(numBatch, SF, hdfsRoot)
+  TPCHSchema.setQueryMetaData(numBatch, SF, hdfsRoot, inputPartitions)
 
   private var query_name: String = null
 
@@ -36,6 +37,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val sparkConf = new SparkConf()
       .set(SQLConf.SHUFFLE_PARTITIONS.key, shuffleNum)
       .set(SQLConf.SLOTHDB_STAT_DIR.key, statDIR)
+      .set(SQLConf.SLOTHDB_ENABLE_INCREMENTABILITY.key, incrementability)
 
     val spark = SparkSession.builder()
       .config(sparkConf)
@@ -421,7 +423,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     return s.join(n, $"s_nationkey" === $"n_nationkey")
       .join(ps, $"s_suppkey" === $"ps_suppkey")
       .agg(
-        doubleSum($"ps_supplycost" * $"ps_availqty" * 0.0001).as("small_value"))
+        doubleSum($"ps_supplycost" * $"ps_availqty" * 0.0001/SF).as("small_value"))
   }
 
   def execQ11(spark: SparkSession): Unit = {
@@ -819,12 +821,13 @@ object QueryTPCH {
 
     if (args.length < 7) {
       System.err.println("Usage: QueryTPCH <bootstrap-servers> <query>" +
-        "<numBatch> <number-shuffle-partition> <statistics dir> <SF> <HDFS root>")
+        "<numBatch> <number-shuffle-partition> <statistics dir> <SF> <HDFS root>" +
+        "<Enable Incrementability> <num of input partitions>")
       System.exit(1)
     }
 
-    val tpch = new QueryTPCH(args(0), args(1), args(2).toInt,
-      args(3), args(4), args(5).toDouble, args(6))
+    val tpch = new QueryTPCH(args(0), args(1), args(2).toInt, args(3),
+      args(4), args(5).toDouble, args(6), args(7), args(8).toInt)
     tpch.execQuery(args(1))
   }
 }

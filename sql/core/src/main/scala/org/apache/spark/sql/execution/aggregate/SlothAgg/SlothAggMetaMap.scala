@@ -36,7 +36,7 @@ case class NonIncMetaPerExpr(aggExpr: AggregateExpression,
                              dataType: DataType)
 
 case class AggMetaData (var counter: Int, val oldMaxID: Long,
-                   var newMaxID: Long, val isNewGroup: Boolean, val hasChange: Array[Boolean])
+                   var newMaxID: Long, val hasChange: Array[Boolean])
 
 class SlothAggMetaMap (
     groupExpressions: Seq[NamedExpression],
@@ -44,17 +44,22 @@ class SlothAggMetaMap (
     stateInfo: Option[StatefulOperatorStateInfo],
     storeConf: StateStoreConf,
     hadoopConf: Configuration,
-    watermarkForKey: Option[Predicate]) {
+    watermarkForKey: Option[Predicate],
+    repairMode: Boolean) {
 
   private var hashMap = HashMap.empty[UnsafeRow, AggMetaData]
   private val metaStore = new GroupKeytoMetaStore(groupExpressions,
-    stateInfo, storeConf, hadoopConf, watermarkForKey)
+    stateInfo, storeConf, hadoopConf, watermarkForKey, repairMode)
+  private val counterIndex = 0
+  private val maxIdIndex = 1
+  private val hasChangeIndex = 2
 
   def reInit(stateInfo: Option[StatefulOperatorStateInfo],
              storeConf: StateStoreConf,
-             hadoopConf: Configuration): Unit = {
+             hadoopConf: Configuration,
+             repairMode: Boolean): Unit = {
     hashMap = HashMap.empty[UnsafeRow, AggMetaData]
-    metaStore.reInit(stateInfo, storeConf, hadoopConf)
+    metaStore.reInit(stateInfo, storeConf, hadoopConf, repairMode)
   }
 
   def purge(): Unit = {
@@ -62,55 +67,85 @@ class SlothAggMetaMap (
   }
 
   def newEntry(groupkey: UnsafeRow): Unit = {
-    hashMap += (groupkey.copy() -> metaStore.get(groupkey))
+    if (repairMode) hashMap += (groupkey.copy() -> metaStore.get(groupkey))
   }
 
   def incCounter(groupkey: UnsafeRow): Unit = {
-    hashMap(groupkey).counter += 1
+    if (repairMode) hashMap(groupkey).counter += 1
+    else {
+      val rawVal = metaStore.getRaw(groupkey)
+      val counter = rawVal.getInt(counterIndex)
+      rawVal.setInt(counterIndex, counter + 1)
+    }
   }
 
   def decCounter(groupkey: UnsafeRow): Unit = {
-    val metaData = hashMap(groupkey)
-    metaData.counter -= 1
-    assert(metaData.counter >= 0,
-      "AGG Counter should never be less than 0")
+    if (repairMode) {
+      val metaData = hashMap(groupkey)
+      metaData.counter -= 1
+      assert(metaData.counter >= 0,
+        "AGG Counter should never be less than 0")
+    } else {
+      val rawVal = metaStore.getRaw(groupkey)
+      val counter = rawVal.getInt(counterIndex)
+      rawVal.setInt(counterIndex, counter - 1)
+      assert(counter >= 1,
+        "AGG Counter should never be less than 0")
+    }
   }
 
   def getCounter(groupkey: UnsafeRow): Int = {
-    hashMap(groupkey).counter
+    if (repairMode) hashMap(groupkey).counter
+    else metaStore.getRaw(groupkey).getInt(counterIndex)
   }
 
   def allocID(groupkey: UnsafeRow): Long = {
-    val newMaxID = hashMap(groupkey).newMaxID
-    hashMap(groupkey).newMaxID = newMaxID + 1
-    newMaxID
+    if (repairMode) {
+      val newMaxID = hashMap(groupkey).newMaxID
+      hashMap(groupkey).newMaxID = newMaxID + 1
+      newMaxID
+    } else {
+      val rawVal = metaStore.getRaw(groupkey)
+      val newMaxID = rawVal.getLong(maxIdIndex)
+      rawVal.setLong(maxIdIndex, newMaxID + 1)
+      newMaxID
+    }
   }
 
   def getOldMaxID(groupkey: UnsafeRow): Long = {
-    hashMap(groupkey).oldMaxID
+    if (repairMode) hashMap(groupkey).oldMaxID
+    else throw new IllegalArgumentException("Repair mode does not support getOldMaxID")
   }
 
   def getNewMaxID(groupkey: UnsafeRow): Long = {
-    hashMap(groupkey).newMaxID
+    if (repairMode) hashMap(groupkey).newMaxID
+    else metaStore.getRaw(groupkey).getLong(maxIdIndex)
   }
 
   def setHasChange(groupkey: UnsafeRow, exprIndex: Int): Unit = {
-    hashMap(groupkey).hasChange(exprIndex) = true
+    if (repairMode) hashMap(groupkey).hasChange(exprIndex) = true
+    else {
+      val rawValue = metaStore.getRaw(groupkey)
+      rawValue.setBoolean(hasChangeIndex, true)
+    }
   }
 
   def getHasChange(groupkey: UnsafeRow, exprIndex: Int): Boolean = {
-    val metaData = hashMap.get(groupkey)
-    if (metaData.isDefined) {metaData.get.hasChange(exprIndex)}
-    else false
+    if (repairMode) {
+      val metaData = hashMap.get(groupkey)
+      if (metaData.isDefined) {
+        metaData.get.hasChange(exprIndex)
+      }
+      else false
+    } else {
+      val rawValue = metaStore.getRaw(groupkey)
+      rawValue.getBoolean(hasChangeIndex)
+    }
   }
 
-  def isNewGroup(groupkey: UnsafeRow): Boolean = {
-    hashMap(groupkey).isNewGroup
-  }
-
-  def iterator(): Iterator[(UnsafeRow, AggMetaData)] = {
-    hashMap.iterator
-  }
+  // def isNewGroup(groupkey: UnsafeRow): Boolean = {
+  //   hashMap(groupkey).isNewGroup
+  // }
 
   def commit(): Unit = {
     metaStore.commit()
@@ -120,25 +155,27 @@ class SlothAggMetaMap (
     metaStore.abortIfNeeded()
   }
 
-  def getNumKeys(): Long = {
+  def getNumKeys: Long = {
     metaStore.metrics.numKeys
   }
 
-  def getMemoryConsumption(): Long = {
+  def getMemoryConsumption: Long = {
     metaStore.metrics.memoryUsedBytes
   }
 
   def saveToStateStore(): Unit = {
-    hashMap.iterator.foreach(pair => {
-      val groupKey = pair._1
-      val aggMetaData = pair._2
-      if (aggMetaData.counter != 0 ) {
-        metaStore.put(groupKey, aggMetaData)
-      } else if (!aggMetaData.isNewGroup) {
-        // counter equals 0 and is not a new group
-        metaStore.remove(groupKey)
-      }
-    })
+    if (repairMode) {
+      hashMap.iterator.foreach(pair => {
+        val groupKey = pair._1
+        val aggMetaData = pair._2
+        if (aggMetaData.counter != 0 ) {
+          metaStore.put(groupKey, aggMetaData)
+        } else {
+          // counter equals 0 and is not a new group
+          metaStore.remove(groupKey)
+        }
+      })
+    }
   }
 
   private class GroupKeytoMetaStore (
@@ -146,7 +183,8 @@ class SlothAggMetaMap (
     var stateInfo: Option[StatefulOperatorStateInfo],
     var storeConf: StateStoreConf,
     var hadoopConf: Configuration,
-    watermarkForKey: Option[Predicate]) extends Logging {
+    watermarkForKey: Option[Predicate],
+    repairMode: Boolean) extends Logging {
 
     private val storeName = "GroupKeytoMetaStore"
 
@@ -157,6 +195,7 @@ class SlothAggMetaMap (
     private val valSchema = new StructType()
       .add("counter", "int")
       .add("maxid", "long")
+      .add("hasChange", "boolean")
     private val valueProj = UnsafeProjection.create(valSchema)
     private val valueRow = valueProj(new SpecificInternalRow(valSchema))
 
@@ -164,7 +203,8 @@ class SlothAggMetaMap (
 
     def reInit(stateInfo: Option[StatefulOperatorStateInfo],
                storeConf: StateStoreConf,
-               hadoopConf: Configuration): Unit = {
+               hadoopConf: Configuration,
+               repairMode: Boolean): Unit = {
       this.stateInfo = stateInfo
       this.storeConf = storeConf
       this.hadoopConf = hadoopConf
@@ -177,20 +217,34 @@ class SlothAggMetaMap (
       val nonIncHasChange = new Array[Boolean](nonIncExprNum)
       val tmpValRow = stateStore.get(key)
       if (tmpValRow == null) {
-        new AggMetaData(0, 0L, 0L, true, nonIncHasChange)
+        new AggMetaData(0, 0L, 0L, nonIncHasChange)
+      } else {
+        if (tmpValRow.getBoolean(hasChangeIndex)) {
+          nonIncHasChange.zipWithIndex.foreach(pair => nonIncHasChange(pair._2) = true)
+        }
+        new AggMetaData(tmpValRow.getInt(counterIndex), tmpValRow.getLong(maxIdIndex),
+          tmpValRow.getLong(maxIdIndex), nonIncHasChange)
       }
-      else {
-        new AggMetaData(tmpValRow.getInt(0), tmpValRow.getLong(1),
-          tmpValRow.getLong(1), false, nonIncHasChange)
+    }
+
+    def getRaw(key: UnsafeRow): UnsafeRow = {
+      val tmpValRow = stateStore.get(key)
+      if (tmpValRow == null) {
+        valueRow.setInt(counterIndex, 0)
+        valueRow.setLong(maxIdIndex, 0L)
+        valueRow.setBoolean(hasChangeIndex, false)
+        stateStore.put(key, valueRow)
       }
+      stateStore.get(key)
     }
 
     /** Set the meta info for a group key */
     def put(key: UnsafeRow, value: AggMetaData): Unit = {
       require(value.counter > 0,
         s"group counter should be larger than 0 when it is written into store")
-      valueRow.setInt(0, value.counter)
-      valueRow.setLong(1, value.newMaxID)
+      valueRow.setInt(counterIndex, value.counter)
+      valueRow.setLong(maxIdIndex, value.newMaxID)
+      valueRow.setBoolean(hasChangeIndex, value.hasChange.exists(_ == true))
       stateStore.put(key, valueRow)
     }
 

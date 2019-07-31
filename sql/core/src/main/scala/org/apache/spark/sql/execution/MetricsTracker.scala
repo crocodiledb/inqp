@@ -29,6 +29,32 @@ import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.util.Utils
 
+case class SlothSummarizedMetrics() {
+
+  var nodeName: String = _
+  var children: Seq[SlothSummarizedMetrics] = _
+  var numOfRows: Long = _
+  var updateRows: Long = _
+  var deleteRows: Long = _
+  var hasMetrics: Boolean = _
+  val formatter = java.text.NumberFormat.getIntegerInstance
+
+  def updateMetrics(metricsTracker: SlothMetricsTracker): Unit = {
+    numOfRows += metricsTracker.getNumOutputRows
+    updateRows += metricsTracker.getUpdateRows
+    deleteRows += metricsTracker.getDeleteRows
+  }
+
+  def getFormattedMetrics(): String = {
+    val baseString = s"${nodeName} [numOfRows: ${formatter.format(numOfRows)}]"
+    val updateString = if (updateRows != 0) s" [updateRows: ${formatter.format(updateRows)}]"
+                       else ""
+    val deleteString = if (deleteRows != 0) s" [deleteRows: ${formatter.format(deleteRows)}]"
+                       else ""
+    baseString + updateString + deleteString + "\n"
+  }
+}
+
 class SlothProgressMetrics (val shortName: String,
                        val metricMap: ju.Map[String, JLong]) {
   /** The compact JSON representation of this progress. */
@@ -61,6 +87,34 @@ trait SlothMetricsTracker extends SparkPlan { self: SparkPlan =>
       new java.util.HashMap(extractedMetrics.mapValues(long2Long).asJava)
 
     new SlothProgressMetrics(nodeName, javaMetrics)
+  }
+
+  def getRowProgress(): String = {
+    var progressString: String = nodeName
+    val extractedMetrics = metrics
+      .filter(entry => entry._1.equals("numOutputRows") || entry._1.equals("deleteRows"))
+      .map(entry => entry._1 -> longMetric(entry._1).value)
+      .foreach(entry => progressString = progressString + "[" + entry._1 + ": " + entry._2 + "]")
+
+    progressString + "\n"
+  }
+
+  def getNumOutputRows(): Long = {
+    val metric = metrics.get("numOutputRows")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getUpdateRows(): Long = {
+    val metric = metrics.get("updateRows")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getDeleteRows(): Long = {
+    val metric = metrics.get("deleteRows")
+    if (metric.isDefined) metric.get.value
+    else 0L
   }
 
   /** Records the duration of running `body` for the next query progress update. */

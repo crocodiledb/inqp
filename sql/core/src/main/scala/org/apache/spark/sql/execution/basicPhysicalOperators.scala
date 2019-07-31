@@ -141,9 +141,9 @@ case class SlothProjectExec(projectList: Seq[NamedExpression],
 
 case class SlothProjectRuntime(outputProj: UnsafeProjection) extends SlothRuntime
 
-/** Physical plan for Filter. SlothDB: Added MetricsTracker */
+/** Physical plan for Filter. */
 case class FilterExec(condition: Expression, child: SparkPlan)
-  extends UnaryExecNode with CodegenSupport with PredicateHelper with SlothMetricsTracker {
+  extends UnaryExecNode with CodegenSupport with PredicateHelper {
 
   // Split out all the IsNotNulls from condition.
   private val (notNullPreds, otherPreds) = splitConjunctivePredicates(condition).partition {
@@ -272,6 +272,56 @@ case class FilterExec(condition: Expression, child: SparkPlan)
     val numOutputRows = longMetric("numOutputRows")
     child.execute().mapPartitionsWithIndexInternal { (index, iter) =>
       val predicate = newPredicate(condition, child.output)
+      predicate.initialize(0)
+      iter.filter { row =>
+        val r = predicate.eval(row)
+        if (r) numOutputRows += 1
+        r
+      }
+    }
+  }
+
+  override def outputOrdering: Seq[SortOrder] = child.outputOrdering
+
+  override def outputPartitioning: Partitioning = child.outputPartitioning
+}
+
+/** Physical plan for Filter. SlothDB: Added MetricsTracker */
+case class SlothFilterExec(condition: Expression, child: SparkPlan)
+  extends UnaryExecNode with PredicateHelper with SlothMetricsTracker {
+
+  // Split out all the IsNotNulls from condition.
+  private val (notNullPreds, otherPreds) = splitConjunctivePredicates(condition).partition {
+    case IsNotNull(a) => isNullIntolerant(a) && a.references.subsetOf(child.outputSet)
+    case _ => false
+  }
+
+  // If one expression and its children are null intolerant, it is null intolerant.
+  private def isNullIntolerant(expr: Expression): Boolean = expr match {
+    case e: NullIntolerant => e.children.forall(isNullIntolerant)
+    case _ => false
+  }
+
+  // The columns that will filtered out by `IsNotNull` could be considered as not nullable.
+  private val notNullAttributes = notNullPreds.flatMap(_.references).distinct.map(_.exprId)
+
+  override def output: Seq[Attribute] = {
+    child.output.map { a =>
+      if (a.nullable && notNullAttributes.contains(a.exprId)) {
+        a.withNullability(false)
+      } else {
+        a
+      }
+    }
+  }
+
+  override lazy val metrics = Map(
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+
+  protected override def doExecute(): RDD[InternalRow] = {
+    val numOutputRows = longMetric("numOutputRows")
+    child.execute().mapPartitionsWithIndexInternal { (index, iter) =>
+      val predicate = newPredicate(condition, child.output)
 
       predicate.initialize(0)
 
@@ -330,23 +380,11 @@ case class FilterExec(condition: Expression, child: SparkPlan)
     }
   }
 
-  // protected override def doExecute(): RDD[InternalRow] = {
-  //   val numOutputRows = longMetric("numOutputRows")
-  //   child.execute().mapPartitionsWithIndexInternal { (index, iter) =>
-  //     val predicate = newPredicate(condition, child.output)
-  //     predicate.initialize(0)
-  //     iter.filter { row =>
-  //       val r = predicate.eval(row)
-  //       if (r) numOutputRows += 1
-  //       r
-  //     }
-  //   }
-  // }
-
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
 
   override def outputPartitioning: Partitioning = child.outputPartitioning
 }
+
 
 /**
  * Physical plan for sampling the dataset.

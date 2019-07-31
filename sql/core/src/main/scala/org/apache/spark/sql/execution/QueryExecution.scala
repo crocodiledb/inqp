@@ -35,6 +35,7 @@ import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCom
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExec, WriteToDataSourceV2Exec}
 import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.streaming.{MicroBatchExecution, SlothSimpleHashJoinExec, SlothSymmetricHashJoinExec, SlothThetaJoinExec}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampType, _}
 import org.apache.spark.util.Utils
 
@@ -236,24 +237,40 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     plan.children.foreach(setFinalAggId)
   }
 
+  private def initialStarupTime = 3000
+  private def perExecutionStartupTime = 60
+  private def joinStartupTime = 15
+  private def aggStartupTime = 15
+  private def filterStartupTime = 5
+  private def sourceStartupTime = 5
+
   private def getPerOpStartUpTime(plan: SparkPlan): Long = {
     val childCost = plan.children.map(getPerOpStartUpTime).sum
 
-    if (plan.isInstanceOf[SlothHashAggregateExec] ||
-    plan.isInstanceOf[SlothSymmetricHashJoinExec] ||
-    plan.isInstanceOf[SlothThetaJoinExec]) {
-      childCost + 15
-    } else if (plan.isInstanceOf[SlothProjectExec]) {
-      childCost
-    } else childCost
+    plan match {
+      case _: SlothHashAggregateExec =>
+        childCost + aggStartupTime
+      case _: SlothSymmetricHashJoinExec =>
+        childCost + joinStartupTime
+      case _: SlothThetaJoinExec =>
+        childCost + joinStartupTime
+      case _: SlothFilterExec =>
+        childCost + filterStartupTime
+      case _: DataSourceV2ScanExec =>
+        childCost + sourceStartupTime
+      case _ =>
+        childCost
+    }
   }
 
-  private def setStartUpTime(plan: SparkPlan): Unit = {
+  private def setStartUpTime(plan: SparkPlan, isFirstBatch: Boolean): Unit = {
     plan match {
       case sink: WriteToDataSourceV2Exec =>
-       sink.setStartUpTime(getPerOpStartUpTime(sink) + 60)
+        val startUpTime =
+          if (isFirstBatch) initialStarupTime + perExecutionStartupTime
+          else perExecutionStartupTime
+       sink.setStartUpTime(getPerOpStartUpTime(sink) + startUpTime)
       case _ =>
-
     }
   }
 
@@ -265,6 +282,16 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
       case _ =>
     }
     plan.children.foreach(child => setFirstBatch(child, isFirstBatch))
+  }
+
+  private def setRepairMode(plan: SparkPlan, repairMode: Boolean): Unit = {
+    if (plan == null) return
+    plan match {
+      case slothHash: SlothHashAggregateExec =>
+        slothHash.setRepairMode(repairMode)
+      case _ =>
+    }
+    plan.children.foreach(child => setRepairMode(child, repairMode))
   }
 
   // Several optimization techniques by SlothDB
@@ -294,10 +321,18 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     setFinalAggId(executedPlan)
 
     // Set startup time
-    setStartUpTime(executedPlan)
+    setStartUpTime(executedPlan, microExec.currentBatchId == 0)
 
     // Set isFirstBatch for Static Tables
     setFirstBatch(executedPlan, microExec.currentBatchId == 0)
+
+    // Set repair mode
+    val repairConf = sparkSession.conf.get(SQLConf.SLOTHDB_ENABLE_INCREMENTABILITY)
+    if (repairConf.isDefined && repairConf.get) {
+      setRepairMode(executedPlan, microExec.currentBatchId == 0 || microExec.isLastBatch)
+    } else {
+      setRepairMode(executedPlan, true)
+    }
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be

@@ -130,8 +130,12 @@ object TPCHSchema {
 
   var numMiniBatch = 4
   var scaleFactor = 1.0
+  var partitions = 1
 
-  def lineitemSize: Int = (6010000 * scaleFactor).toInt
+  def lineitemSize: Int =
+    if (scaleFactor == 10) 59986052
+    else if (scaleFactor == 0.1) 600572
+    else (6000000 * scaleFactor).toInt
   def ordersSize: Int = (1500000 * scaleFactor).toInt
   def customerSize: Int = (150000 * scaleFactor).toInt
   def partSize: Int = (200000 * scaleFactor).toInt
@@ -140,12 +144,17 @@ object TPCHSchema {
   def nationSize: Int = 25
   def regionSize: Int = 5
 
-  def lineitemOffset: Int = (lineitemSize + numMiniBatch - 1) / numMiniBatch
-  def supplierOffset: Int = (supplierSize + numMiniBatch - 1) / numMiniBatch
-  def partOffset: Int = (partSize + numMiniBatch - 1) / numMiniBatch
-  def partsuppOffset: Int = (partsuppSize + numMiniBatch - 1) / numMiniBatch
-  def customerOffset: Int = (customerSize + numMiniBatch - 1) / numMiniBatch
-  def ordersOffset: Int = (ordersSize + numMiniBatch - 1) / numMiniBatch
+  def getOffset(size: Int): Int = {
+    val perPartition = (size + numMiniBatch*partitions - 1)/(numMiniBatch * partitions)
+    perPartition*partitions
+  }
+
+  def lineitemOffset: Int = getOffset(lineitemSize)
+  def supplierOffset: Int = getOffset(supplierSize)
+  def partOffset: Int = getOffset(partSize)
+  def partsuppOffset: Int = getOffset(partsuppSize)
+  def customerOffset: Int = getOffset(customerSize)
+  def ordersOffset: Int = getOffset(ordersSize)
   def nationOffset: Int = 25
   def regionOffset: Int = 5
 
@@ -182,11 +191,12 @@ object TPCHSchema {
     }
   }
 
-  def setQueryMetaData(numBatch: Int, SF: Double, hdfsRoot: String): Unit = {
+  def setQueryMetaData(numBatch: Int, SF: Double, hdfsRoot: String, inputPartition: Int): Unit = {
     numMiniBatch = numBatch
     scaleFactor = SF
     checkpointLocation = hdfsRoot + "/tpch_checkpoint"
     staticTableLocation = hdfsRoot + "/tpch_static"
+    partitions = inputPartition
   }
 
 }

@@ -35,7 +35,7 @@ object SQLDataSourceExample {
     runBasicParquetExample(spark)
     runParquetSchemaMergingExample(spark)
     runJsonDatasetExample(spark)
-    runJdbcDatasetExample(spark)
+    // runJdbcDatasetExample(spark)
 
     spark.stop()
   }

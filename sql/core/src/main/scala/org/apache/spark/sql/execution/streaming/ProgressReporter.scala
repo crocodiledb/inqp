@@ -28,9 +28,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{EventTimeWatermark, LogicalPlan}
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
-import org.apache.spark.sql.execution.QueryExecution
-import org.apache.spark.sql.execution.SlothMetricsTracker
-import org.apache.spark.sql.execution.SlothProgressMetrics
+import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExec, WriteToDataSourceV2Exec}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.v2.reader.streaming.MicroBatchReader
@@ -78,6 +76,7 @@ trait ProgressReporter extends Logging {
   private var lastTriggerStartTimestamp = -1L
 
   private var totalTimeSec = 0.0
+  private var lastTimeSec = 0.0
 
   private val currentDurationsMs = new mutable.HashMap[String, Long]()
 
@@ -95,6 +94,8 @@ trait ProgressReporter extends Logging {
 
   private val timestampFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'") // ISO8601
   timestampFormat.setTimeZone(DateTimeUtils.getTimeZone("UTC"))
+
+  private var slothSummarizedMetrics: SlothSummarizedMetrics = _
 
   @volatile
   protected var currentStatus: StreamingQueryStatus = {
@@ -156,7 +157,8 @@ trait ProgressReporter extends Logging {
         statFile = dir + "/slothdb.stat"
         val shuffleNum = sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key)
         val pw = new PrintWriter(new FileWriter(statFile, true))
-        pw.print(f"${name}\t${currentBatchId}\t${shuffleNum}\t${totalTimeSec}%.2f\n")
+        pw.print(f"${name}\t${currentBatchId}\t${shuffleNum}" +
+          f"\t${totalTimeSec}%.2f\t${lastTimeSec}%.2f\n")
         pw.close
       }
     }
@@ -166,15 +168,19 @@ trait ProgressReporter extends Logging {
       case e: IOException =>
         logError(s"Writing ${statFile} error")
     }
+
+    print(getSummarizedMetrics(slothSummarizedMetrics, ""))
   }
 
   private def getProcessTime(): Double = {
-    if (lastExecution.executedPlan.isInstanceOf[WriteToDataSourceV2Exec]) {
-      val sink = lastExecution.executedPlan.asInstanceOf[WriteToDataSourceV2Exec]
-      sink.getProcessTime().toDouble - sink.getStartUpTime().toDouble
-    } else {
-      (currentTriggerEndTimestamp - currentTriggerStartTimestamp).toDouble / 1000
-    }
+    lastTimeSec =
+      if (lastExecution.executedPlan.isInstanceOf[WriteToDataSourceV2Exec]) {
+        val sink = lastExecution.executedPlan.asInstanceOf[WriteToDataSourceV2Exec]
+        sink.getProcessTime().toDouble - sink.getStartUpTime().toDouble
+      } else {
+        (currentTriggerEndTimestamp - currentTriggerStartTimestamp).toDouble / 1000
+      }
+    lastTimeSec
   }
 
   /** Finalizes the query progress and adds it to list of recent status updates. */
@@ -237,7 +243,10 @@ trait ProgressReporter extends Logging {
         sources = sourceProgress.toArray,
         sink = sinkProgress)
 
-      printf(slothProgress.toString)
+      printf(slothProgress.toString + "\n")
+      // printf(slothExtractRowMetricsWithStructure() + "\n")
+
+      slothSummarizeRowMetrics()
     }
 
     if (hasNewData) {
@@ -253,6 +262,90 @@ trait ProgressReporter extends Logging {
     }
 
     currentStatus = currentStatus.copy(isTriggerActive = false)
+  }
+
+  private def slothRowProgress(plan: SparkPlan, indent: String): String = {
+    var retString: String = ""
+    plan match {
+      case metricsTracker: SlothMetricsTracker =>
+        retString = indent + metricsTracker.getRowProgress()
+        plan.children.foreach(child => retString += slothRowProgress(child, indent + "\t"))
+        retString
+      case _ =>
+        if (plan.children.nonEmpty) slothRowProgress(plan.children(0), indent)
+        else ""
+    }
+  }
+
+  private def slothExtractRowMetricsWithStructure(): String = {
+    if (lastExecution == null) return ""
+    slothRowProgress(lastExecution.executedPlan, "")
+  }
+
+  private def populateSummarizedRowMetrics(plan: SparkPlan,
+                                           summarizedMetrics: SlothSummarizedMetrics):
+  Unit = {
+    plan match {
+      case _: SlothMetricsTracker =>
+        val childrenMetrics = plan.children.map(child => {
+          val childMetrics = new SlothSummarizedMetrics()
+          populateSummarizedRowMetrics(child, childMetrics)
+          childMetrics
+        }).filter(_.hasMetrics)
+
+        summarizedMetrics.nodeName = plan.nodeName
+        summarizedMetrics.hasMetrics = true
+        summarizedMetrics.children = childrenMetrics
+
+      case _ =>
+        if (plan.children.isEmpty) summarizedMetrics.hasMetrics = false
+        else populateSummarizedRowMetrics(plan.children(0), summarizedMetrics)
+    }
+  }
+
+  private def updateSummarizedRowMetrics(plan: SparkPlan,
+                                         summarizedMetrics: SlothSummarizedMetrics):
+  Unit = {
+     plan match {
+      case metricsTracker: SlothMetricsTracker =>
+
+        summarizedMetrics.updateMetrics(metricsTracker)
+        plan.children.zipWithIndex.foreach(pair => {
+          val childPlan = pair._1
+          val childIndex = pair._2
+          if (childIndex < summarizedMetrics.children.size) {
+            updateSummarizedRowMetrics(childPlan, summarizedMetrics.children(childIndex))
+          }
+        })
+
+      case _ =>
+        if (!plan.children.isEmpty) {
+          updateSummarizedRowMetrics(plan.children(0), summarizedMetrics)
+        }
+    }
+  }
+
+  private def slothSummarizeRowMetrics(): Unit = {
+    if (lastExecution == null) return
+
+    val rootPlan = lastExecution.executedPlan
+    if (currentBatchId == 0) {
+      slothSummarizedMetrics = new SlothSummarizedMetrics()
+      populateSummarizedRowMetrics(rootPlan, slothSummarizedMetrics)
+    }
+
+    updateSummarizedRowMetrics(rootPlan, slothSummarizedMetrics)
+  }
+
+  private def getSummarizedMetrics(summarizedMetrics: SlothSummarizedMetrics,
+                                   indent: String): String = {
+
+    var retString = indent + summarizedMetrics.getFormattedMetrics()
+    summarizedMetrics.children.foreach(child => {
+      retString += getSummarizedMetrics(child, indent + "\t")
+    })
+
+    retString
   }
 
   private def slothExtractOperatorMetrics(): Seq[SlothProgressMetrics] = {

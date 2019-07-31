@@ -649,9 +649,17 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           execution.ProjectExec(projectList, planLater(child)) :: Nil
         }
       case logical.Filter(condition, child) =>
-        execution.FilterExec(condition, planLater(child)) :: Nil
+        if (SlothDBContext.enable_slothdb) {
+          execution.SlothFilterExec(condition, planLater(child)) :: Nil
+        } else {
+          execution.FilterExec(condition, planLater(child)) :: Nil
+        }
       case f: logical.TypedFilter =>
-        execution.FilterExec(f.typedCondition(f.deserializer), planLater(f.child)) :: Nil
+        if (SlothDBContext.enable_slothdb) {
+          execution.SlothFilterExec(f.typedCondition(f.deserializer), planLater(f.child)) :: Nil
+        } else {
+          execution.FilterExec(f.typedCondition(f.deserializer), planLater(f.child)) :: Nil
+        }
       case e @ logical.Expand(_, _, child) =>
         execution.ExpandExec(e.projections, e.output, planLater(child)) :: Nil
       case logical.Sample(lb, ub, withReplacement, seed, child) =>

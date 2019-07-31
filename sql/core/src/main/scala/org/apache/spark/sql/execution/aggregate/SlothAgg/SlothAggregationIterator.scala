@@ -42,6 +42,8 @@ class SlothAggregationIterator (
     originalInputAttributes: Seq[Attribute],
     inputIter: Iterator[InternalRow],
     numOutputRows: SQLMetric,
+    deleteRows: SQLMetric,
+    updateRows: SQLMetric,
     stateMemory: SQLMetric,
     stateInfo: Option[StatefulOperatorStateInfo],
     storeConf: StateStoreConf,
@@ -49,7 +51,8 @@ class SlothAggregationIterator (
     watermarkForKey: Option[Predicate],
     watermarkForData: Option[Predicate],
     deltaOutput: Boolean,
-    updateOuput: Boolean)
+    updateOuput: Boolean,
+    repairMode: Boolean)
 extends Iterator[InternalRow] with Logging {
 
   private val opRtId = new SlothRuntimeOpId(stateInfo.get.operatorId, stateInfo.get.queryRunId)
@@ -205,24 +208,26 @@ extends Iterator[InternalRow] with Logging {
     }
   }
 
-  private[this] val hashMapforMetaData = if (aggRT != null) {
-    aggRT.hashMapforMetaData.reInit(stateInfo, storeConf, hadoopConf)
-    aggRT.hashMapforMetaData
-  } else {
-    new SlothAggMetaMap(groupingExpressions,
-      nonIncMetaData.length, stateInfo, storeConf, hadoopConf, watermarkForKey)
-  }
-
-
-  private[this] val hashMapforFullData = if (nonIncMetaData.nonEmpty) {
+  private[this] val hashMapforMetaData =
     if (aggRT != null) {
-      aggRT.hashMapforFullData.reInit(stateInfo, storeConf, hadoopConf)
-      aggRT.hashMapforFullData
+      aggRT.hashMapforMetaData.reInit(stateInfo, storeConf, hadoopConf, false)
+      aggRT.hashMapforMetaData
     } else {
-      new SlothAggFullMap(groupingExpressions,
-        originalInputAttributes, stateInfo, storeConf, hadoopConf, watermarkForData)
+      new SlothAggMetaMap(groupingExpressions,
+        nonIncMetaData.length, stateInfo, storeConf, hadoopConf, watermarkForKey, false)
     }
-  } else { null }
+
+
+  private[this] val hashMapforFullData =
+    if (nonIncMetaData.nonEmpty) {
+      if (aggRT != null) {
+        aggRT.hashMapforFullData.reInit(stateInfo, storeConf, hadoopConf)
+        aggRT.hashMapforFullData
+      } else {
+        new SlothAggFullMap(groupingExpressions,
+          originalInputAttributes, stateInfo, storeConf, hadoopConf, watermarkForData)
+      }
+    } else { null }
 
   // private[this] val hashMapforFullData: SlothAggFullMap = null
 
@@ -311,7 +316,7 @@ extends Iterator[InternalRow] with Logging {
     if (isNewGroup) {
       hashMapforMetaData.newEntry(groupKey)
 
-      val storeBuffer = stateStoreforResult.get(groupKey)
+      val storeBuffer = stateStoreforResult.getNew(groupKey)
       if (storeBuffer != null) {
         buffer.copyFrom(storeBuffer)
       }
@@ -396,6 +401,17 @@ extends Iterator[InternalRow] with Logging {
     }
   }
 
+  private def storeIntermediateResult(): Unit = {
+    val intermediateResultIter = hashMapforResult.iterator()
+    while(intermediateResultIter.next()) {
+      val groupKey = intermediateResultIter.getKey
+      val groupVal = intermediateResultIter.getValue
+      if (hashMapforMetaData.getCounter(groupKey) != 0) {
+        stateStoreforResult.putNew(groupKey, groupVal)
+      }
+    }
+  }
+
   private def generateResultProjection(): (UnsafeRow, UnsafeRow) => UnsafeRow = {
     val groupingAttributes = groupingExpressions.map(_.toAttribute)
     val bufferAttributes = aggregateFunctions.flatMap(_.aggBufferAttributes)
@@ -415,38 +431,28 @@ extends Iterator[InternalRow] with Logging {
       generateResultProjection()
     }
 
-  private[this] var resultIter: KVIterator[UnsafeRow, UnsafeRow] = _
-  private[this] var resultIterHasNext: Boolean = _
+  private[this] var resultIter: Iterator[UnsafeRowPair] = _
   private[this] var groupKey: UnsafeRow = _
   private[this] var oldGroupValue: UnsafeRow = _
   private[this] var newGroupValue: UnsafeRow = _
 
   processInputs()
-  computeNonInc()
 
-  stateStoreforResult.scan()
-  resultIter = hashMapforResult.iterator()
-  resultIterHasNext = resultIter.next()
+  if (!repairMode) {
+    storeIntermediateResult()
+  } else {
+    computeNonInc()
+    storeIntermediateResult()
 
-  // // Pre-load the first key-value pair from the aggregationBufferMapIterator.
-  // resultIterHasNext = resultIter.next()
-  // // If the map is empty, we just free it.
-  // if (!resultIterHasNext) {
-  //   hashMapforResult.free()
-  // } else {
-  //   // OK, maybe we need a delete here
-  //   val groupkey = resultIter.getKey
-  //   if (!hashMapforMetaData.isNewGroup(groupkey) && deltaOutput) {
-  //     oldGroupValue = stateStoreforResult.get(groupkey)
-  //   }
-  // }
+    resultIter = stateStoreforResult.iterator()
+  }
 
   TaskContext.get().addTaskCompletionListener[Unit](_ => {
     // At the end of the task, update the task's peak memory usage. Since we destroy
     // the map to create the sorter, their memory usages should not overlap, so it is safe
     // to just use the max of the two.
     val memoryConsumption = hashMapforResult.getPeakMemoryUsedBytes +
-      hashMapforMetaData.getMemoryConsumption() +
+      hashMapforMetaData.getMemoryConsumption +
       {
         if (hashMapforFullData != null) { hashMapforFullData.getMemoryConsumption }
         else { 0L }
@@ -470,19 +476,30 @@ extends Iterator[InternalRow] with Logging {
   })
 
   override final def hasNext: Boolean = {
+    if (!repairMode) return false
+
     if (oldGroupValue != null || newGroupValue != null) return true
 
     // Load the next group having data
-    while (resultIterHasNext && oldGroupValue == null && newGroupValue == null) {
-      groupKey = resultIter.getKey
-      if (!hashMapforMetaData.isNewGroup(groupKey) && deltaOutput) {
-        oldGroupValue = stateStoreforResult.get(groupKey)
-      }
+    while (resultIter.hasNext && oldGroupValue == null && newGroupValue == null) {
+      val rowPair = resultIter.next()
+      groupKey = rowPair.key
+      if (deltaOutput) oldGroupValue = stateStoreforResult.getOld(groupKey)
       if (hashMapforMetaData.getCounter(groupKey) != 0) {
-        newGroupValue = resultIter.getValue
+        newGroupValue = rowPair.value
+      } else {
+        stateStoreforResult.remove(groupKey)
       }
 
-      resultIterHasNext = resultIter.next()
+      // GroupValue not change, do not output
+      if (oldGroupValue != null && newGroupValue != null
+        && oldGroupValue.equals(newGroupValue)) {
+          oldGroupValue = null
+          newGroupValue = null
+      } else if (newGroupValue != null) {
+        stateStoreforResult.putOld(groupKey, newGroupValue)
+      }
+
     }
 
     if (oldGroupValue != null || newGroupValue != null) return true
@@ -500,6 +517,8 @@ extends Iterator[InternalRow] with Logging {
         ret.setUpdate(true && updateOuput)
         oldGroupValue = null
 
+        updateRows += 2
+
         // This is a delete
       } else if (oldGroupValue != null && newGroupValue == null) {
         ret = generateOutput(groupKey, oldGroupValue)
@@ -507,9 +526,10 @@ extends Iterator[InternalRow] with Logging {
         ret.setUpdate(false)
         oldGroupValue = null
 
+        deleteRows += 1
+
         // This is an insert
       } else if (oldGroupValue == null && newGroupValue != null) {
-        stateStoreforResult.put(groupKey, newGroupValue)
         ret = generateOutput(groupKey, newGroupValue)
         ret.setInsert(true)
         ret.setUpdate(false)
@@ -524,53 +544,6 @@ extends Iterator[InternalRow] with Logging {
       throw new IllegalArgumentException
     }
   }
-
-  // override final def hasNext: Boolean = {
-  //   resultIterHasNext || oldGroupValue != null
-  // }
-
-  // override final def next(): UnsafeRow = {
-  //   if (hasNext) {
-  //     var ret: UnsafeRow = null
-  //     val groupkey = resultIter.getKey
-
-  //     if (oldGroupValue != null) {
-  //       ret = generateOutput(groupkey, oldGroupValue)
-  //       ret.setInsert(false)
-  //       ret.setUpdate(isUpdate)
-  //       oldGroupValue = null
-  //     } else {
-  //       val groupval = resultIter.getValue
-
-  //       // Save the key/value into state store
-  //       stateStoreforResult.put(groupkey, groupval)
-
-  //       val result = generateOutput(groupkey, groupval)
-  //       resultIterHasNext = resultIter.next()
-
-  //       if (!resultIterHasNext) {
-  //         val resultCopy = result.copy()
-  //         hashMapforResult.free()
-  //         ret = resultCopy
-  //       } else {
-  //         ret = result
-
-  //         // Check whether we need a delete for the next groupkey
-  //         val nextGroupKey = resultIter.getKey
-  //         if (!hashMapforMetaData.isNewGroup(nextGroupKey) && deltaOutput) {
-  //           oldGroupValue = stateStoreforResult.get(nextGroupKey)
-  //         }
-  //       }
-
-  //       ret.setInsert(true)
-  //     }
-
-  //     numOutputRows += 1
-  //     ret
-  //   } else {
-  //     throw new IllegalArgumentException
-  //   }
-  // }
 
     /**
    * Generate an output row when there is no input and there is no grouping expression.
