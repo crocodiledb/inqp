@@ -27,22 +27,51 @@ import org.json4s.JsonAST.JValue
 import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
 
+import org.apache.spark.sql.SlothDBCostModel._
 import org.apache.spark.util.Utils
 
 case class SlothSummarizedMetrics() {
 
+  var nodeType: Int = _
   var nodeName: String = _
+  var numPart: Int = _
   var children: Seq[SlothSummarizedMetrics] = _
   var numOfRows: Long = _
   var updateRows: Long = _
   var deleteRows: Long = _
+
+  var numGroups: Long = _
+  var left_insert_to_insert: Long = _
+  var left_delete_to_delete: Long = _
+  var left_update_to_update: Long = _
+  var right_insert_to_insert: Long = _
+  var right_delete_to_delete: Long = _
+  var right_update_to_update: Long = _
+  var insert_to_insert: Long = _
+  var delete_to_delete: Long = _
+  var update_to_update: Long = _
+  var numBatch: Long = _
+
   var hasMetrics: Boolean = _
   val formatter = java.text.NumberFormat.getIntegerInstance
 
   def updateMetrics(metricsTracker: SlothMetricsTracker): Unit = {
+    numBatch += 1
+
     numOfRows += metricsTracker.getNumOutputRows
     updateRows += metricsTracker.getUpdateRows
     deleteRows += metricsTracker.getDeleteRows
+
+    numGroups = metricsTracker.getNumGroups
+    left_insert_to_insert += metricsTracker.getLeftInsertToInsert
+    left_delete_to_delete += metricsTracker.getLeftDeleteToDelete
+    left_update_to_update += metricsTracker.getLeftUpdateToUpdate
+    right_insert_to_insert += metricsTracker.getRightInsertToInsert
+    right_delete_to_delete += metricsTracker.getRightDeleteToDelete
+    right_update_to_update += metricsTracker.getRightUpdateToUpdate
+    insert_to_insert += metricsTracker.getInsertToInsert
+    delete_to_delete += metricsTracker.getDeleteToDelete
+    update_to_update += metricsTracker.getUpdateToUpdate
   }
 
   def getFormattedMetrics(): String = {
@@ -52,6 +81,34 @@ case class SlothSummarizedMetrics() {
     val deleteString = if (deleteRows != 0) s" [deleteRows: ${formatter.format(deleteRows)}]"
                        else ""
     baseString + updateString + deleteString + "\n"
+  }
+
+  def getCostModelInfo(): String = {
+    val nodeName = findNameFromType(nodeType)
+    val totalNum = numBatch * numPart
+    if (nodeType == SLOTHJOIN) {
+      val left_insert_prob = (left_insert_to_insert/totalNum).toDouble/SF.toDouble
+      val left_delete_prob = (left_delete_to_delete/totalNum).toDouble/SF.toDouble
+      val left_update_prob = (left_update_to_update/totalNum).toDouble/SF.toDouble
+      val right_insert_prob = (right_insert_to_insert/totalNum).toDouble/SF.toDouble
+      val right_delete_prob = (right_delete_to_delete/totalNum).toDouble/SF.toDouble
+      val right_update_prob = (right_update_to_update/totalNum).toDouble/SF.toDouble
+      return f"$nodeName,$left_insert_prob,$left_delete_prob,$left_update_prob," +
+        f"$right_insert_prob,$right_delete_prob,$right_update_prob\n"
+    } else if (nodeType == SLOTHAGGREGATE) {
+      return f"$nodeName,$numGroups\n"
+    } else if (nodeType == SLOTHSELECT) {
+      val insert_prob = (insert_to_insert/totalNum).toDouble/SF.toDouble
+      val delete_prob = (delete_to_delete/totalNum).toDouble/SF.toDouble
+      val update_prob = (update_to_update/totalNum).toDouble/SF.toDouble
+      return f"$nodeName,$insert_prob,$delete_prob,$update_prob\n"
+    } else if (nodeType == SLOTHSCAN) {
+      return f"$nodeName,$numOfRows\n"
+    } else if (nodeType == SLOTHDISTINCT) {
+      return f"$nodeName,$numGroups\n"
+    } else {
+      return f"$nodeName\n"
+    }
   }
 }
 
@@ -113,6 +170,66 @@ trait SlothMetricsTracker extends SparkPlan { self: SparkPlan =>
 
   def getDeleteRows(): Long = {
     val metric = metrics.get("deleteRows")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getNumGroups(): Long = {
+    val metric = metrics.get("numGroups")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getLeftInsertToInsert(): Long = {
+    val metric = metrics.get("left_insert_to_insert")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getLeftDeleteToDelete(): Long = {
+    val metric = metrics.get("left_delete_to_delete")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getLeftUpdateToUpdate(): Long = {
+    val metric = metrics.get("left_update_to_update")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getRightInsertToInsert(): Long = {
+    val metric = metrics.get("right_insert_to_insert")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getRightDeleteToDelete(): Long = {
+    val metric = metrics.get("right_delete_to_delete")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getRightUpdateToUpdate(): Long = {
+    val metric = metrics.get("right_update_to_update")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getInsertToInsert(): Long = {
+    val metric = metrics.get("insert_to_insert")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getDeleteToDelete(): Long = {
+    val metric = metrics.get("delete_to_delete")
+    if (metric.isDefined) metric.get.value
+    else 0L
+  }
+
+  def getUpdateToUpdate(): Long = {
+    val metric = metrics.get("update_to_update")
     if (metric.isDefined) metric.get.value
     else 0L
   }

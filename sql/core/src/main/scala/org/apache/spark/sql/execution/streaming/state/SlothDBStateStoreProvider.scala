@@ -82,7 +82,7 @@ private[state] class SlothDBStateStoreProvider extends StateStoreProvider with L
 
     /** Commit all the updates that have been made to the store, and return the new version. */
     override def commit(): Long = {
-      verify(state == UPDATING, "Cannot commit after already committed or aborted")
+      verify(state == UPDATING, s"Cannot commit after already ${state}")
 
       try {
         commitUpdates(newVersion, mapToUpdate)

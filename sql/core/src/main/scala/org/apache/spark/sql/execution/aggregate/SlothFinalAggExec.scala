@@ -79,7 +79,9 @@ case class SlothFinalAggExec (
   protected override def doExecute(): RDD[InternalRow] = attachTree(this, "execute") {
 
     child.execute().mapPartitionsWithIndex { (partIndex, iter) => {
-      val finalAgg = new SlothFinalAgg(
+      if (iter.isEmpty) Iterator.empty
+      else {
+        val finalAgg = new SlothFinalAgg(
           partIndex,
           groupingExpressions,
           child.output,
@@ -89,11 +91,13 @@ case class SlothFinalAggExec (
           resultExpressions,
           (expressions, inputSchema) =>
             newMutableProjection(expressions, inputSchema, subexpressionEliminationEnabled),
-        new SlothRuntimeOpId(opId, runId))
+          new SlothRuntimeOpId(opId, runId))
 
-      CompletionIterator[InternalRow, Iterator[InternalRow]](
-        iter.map(finalAgg.processFinalRow),
-        finalAgg.onCompletion())
+        CompletionIterator[InternalRow, Iterator[InternalRow]](
+          iter.map(finalAgg.processFinalRow),
+          finalAgg.onCompletion())
+      }
+
     }}
   }
 

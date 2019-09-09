@@ -30,7 +30,6 @@ import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.execution.streaming.{SlothRuntime, SlothRuntimeCache, SlothRuntimeOpId, StatefulOperatorStateInfo}
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.types._
-import org.apache.spark.unsafe.KVIterator
 
 class SlothAggregationIterator (
     partIndex: Int,
@@ -45,6 +44,7 @@ class SlothAggregationIterator (
     deleteRows: SQLMetric,
     updateRows: SQLMetric,
     stateMemory: SQLMetric,
+    numGroups: SQLMetric,
     stateInfo: Option[StatefulOperatorStateInfo],
     storeConf: StateStoreConf,
     hadoopConf: Configuration,
@@ -564,6 +564,8 @@ extends Iterator[InternalRow] with Logging {
 
   def onCompletion(): Unit = {
     hashMapforResult.free()
+
+    numGroups.set(hashMapforMetaData.getNumKeys)
 
     hashMapforMetaData.saveToStateStore()
     hashMapforMetaData.commit()

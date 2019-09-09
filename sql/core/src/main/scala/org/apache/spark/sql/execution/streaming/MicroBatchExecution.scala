@@ -23,11 +23,11 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.{Map => MutableMap}
 
-import org.apache.spark.sql.{Dataset, SlothDBContext, SparkSession}
+import org.apache.spark.sql.{Dataset, SlothDBContext, SlothDBCostModel, SparkSession}
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.catalyst.expressions.{Alias, CurrentBatchTimestamp, CurrentDate, CurrentTimestamp}
 import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, Project}
-import org.apache.spark.sql.execution.{SlothProjectExec, SQLExecution}
+import org.apache.spark.sql.execution.{SlothFilterExec, SlothProjectExec, SQLExecution}
 import org.apache.spark.sql.execution.datasources.v2.{StreamingDataSourceV2Relation, WriteToDataSourceV2}
 import org.apache.spark.sql.execution.streaming.sources.MicroBatchWriter
 import org.apache.spark.sql.sources.v2.{DataSourceOptions, DataSourceV2, MicroBatchReadSupport, StreamWriteSupport}
@@ -68,6 +68,14 @@ class MicroBatchExecution(
   val projArray = new mutable.ArrayBuffer[Tuple2[SlothProjectExec, Long]]()
   var projId = 100
   var isLastBatch: Boolean = _
+
+  val filterArray = new mutable.ArrayBuffer[Tuple2[SlothFilterExec, Long]]()
+  var filterId = 200
+
+  var finalAggStartId = 300
+
+  // SlothDB: Cost model
+  val slothCostModel = new SlothDBCostModel();
 
   override lazy val logicalPlan: LogicalPlan = {
     assert(queryExecutionThread eq Thread.currentThread,
@@ -163,6 +171,8 @@ class MicroBatchExecution(
 
     val noDataBatchesEnabled =
       sparkSessionForStream.sessionState.conf.streamingNoDataMicroBatchesEnabled
+
+    // slothCostModel.initialize(logicalPlan, name, slothdbStatDir)
 
     triggerExecutor.execute(() => {
       if (isActive) {

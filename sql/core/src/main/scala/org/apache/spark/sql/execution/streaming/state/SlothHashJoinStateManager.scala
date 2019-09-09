@@ -95,6 +95,8 @@ class SlothHashJoinStateManager (
 
   import SlothHashJoinStateManager._
 
+  private var stateSize = 0
+
   def reInit(stateInfo: Option[StatefulOperatorStateInfo],
                  storeConf: StateStoreConf,
                  hadoopConf: Configuration): Unit = {
@@ -108,6 +110,10 @@ class SlothHashJoinStateManager (
   def purgeState(): Unit = {
     keyToNumValues.purgeState()
     keyWithIndexToValue.purgeState()
+  }
+
+  def getStateSize(): Long = {
+    return stateSize
   }
 
   /*
@@ -144,6 +150,8 @@ class SlothHashJoinStateManager (
     val numExistingValues = keyToNumValues.get(key)
     keyWithIndexToValue.put(key, numExistingValues, value)
     keyToNumValues.put(key, numExistingValues + 1)
+
+    stateSize += 1
   }
 
   def remove(key: UnsafeRow, value: UnsafeRow): Unit = {
@@ -153,6 +161,8 @@ class SlothHashJoinStateManager (
     require(kvRow.isDefined, "We must find the KV when removing a record from the state")
 
     keyWithIndexToValue.remove(key, kvRow.get.valueIndex)
+
+    stateSize -= 1
   }
 
   /**

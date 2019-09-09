@@ -127,6 +127,16 @@ public final class SlothAggResultMap {
     });
   }
 
+  public boolean containGroupingKey(UnsafeRow groupingKey) {
+    final BytesToBytesMap.Location loc = map.lookup(
+            groupingKey.getBaseObject(),
+            groupingKey.getBaseOffset(),
+            groupingKey.getSizeInBytes(),
+            groupingKey.hashCode()
+    );
+    return loc.isDefined();
+  }
+
   /**
    * Return the aggregation buffer for the current group. For efficiency, all calls to this method
    * return the same object. If additional memory could not be allocated, then this method will

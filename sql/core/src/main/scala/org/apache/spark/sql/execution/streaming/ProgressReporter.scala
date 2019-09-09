@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution.streaming
 
-import java.io.{File, FileWriter, IOException, PrintWriter}
+import java.io.{FileWriter, IOException, PrintWriter}
 import java.text.SimpleDateFormat
 import java.util.{Date, NoSuchElementException, UUID}
 
@@ -25,6 +25,7 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.SlothDBCostModel._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{EventTimeWatermark, LogicalPlan}
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
@@ -151,18 +152,28 @@ trait ProgressReporter extends Logging {
 
   protected def slothDBWriteStats(): Unit = {
     var statFile: String = null
+    var modelFile: String = null
     try {
       val dir = slothdbStatDir
       if (dir != null) {
         statFile = dir + "/slothdb.stat"
         val shuffleNum = sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key)
+        val inc_conf = sparkSession.conf.get(SQLConf.SLOTHDB_ENABLE_INCREMENTABILITY)
+        val inc_aware =
+          if (inc_conf.isDefined && inc_conf.get) "true"
+          else "false"
         val pw = new PrintWriter(new FileWriter(statFile, true))
-        pw.print(f"${name}\t${currentBatchId}\t${shuffleNum}" +
+        pw.print(f"${name}\t${currentBatchId}\t${inc_aware}\t${shuffleNum}" +
           f"\t${totalTimeSec}%.2f\t${lastTimeSec}%.2f\n")
-        pw.close
+        pw.close()
+
+        // Write cost model information
+        modelFile = dir + f"/${name}_model.stat"
+        val modelPW = new PrintWriter(new FileWriter(modelFile, false))
+        modelPW.print(getCostModelInfo(slothSummarizedMetrics))
+        modelPW.close()
       }
-    }
-    catch {
+    } catch {
       case e: NoSuchElementException =>
         logInfo("SlothDB Stats Dir is not set")
       case e: IOException =>
@@ -293,7 +304,9 @@ trait ProgressReporter extends Logging {
           childMetrics
         }).filter(_.hasMetrics)
 
+        summarizedMetrics.nodeType = findNodeType(plan)
         summarizedMetrics.nodeName = plan.nodeName
+        summarizedMetrics.numPart = sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key).toInt
         summarizedMetrics.hasMetrics = true
         summarizedMetrics.children = childrenMetrics
 
@@ -335,6 +348,15 @@ trait ProgressReporter extends Logging {
     }
 
     updateSummarizedRowMetrics(rootPlan, slothSummarizedMetrics)
+  }
+
+  private def getCostModelInfo(summarizedMetrics: SlothSummarizedMetrics): String = {
+    var retString = summarizedMetrics.getCostModelInfo()
+    summarizedMetrics.children.foreach(child => {
+      retString += getCostModelInfo(child)
+    })
+
+    retString
   }
 
   private def getSummarizedMetrics(summarizedMetrics: SlothSummarizedMetrics,

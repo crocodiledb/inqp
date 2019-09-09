@@ -62,7 +62,9 @@ case class SlothHashAggregateExec (
     "updateRows" -> SQLMetrics.createMetric(sparkContext, "number of updates output"),
     "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory"),
     "aggTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "aggregate time"),
-    "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"))
+    "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"),
+    "numGroups" -> SQLMetrics.createMetric(sparkContext, "number of groups")
+  )
 
   override def output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
 
@@ -104,6 +106,7 @@ case class SlothHashAggregateExec (
       val updateRows = longMetric("updateRows")
       val aggTimeMs = longMetric("aggTimeMs")
       val stateMemory = longMetric("stateMemory")
+      val numGroups = longMetric("numGroups")
 
       val beforeAgg = System.nanoTime()
       val resIter =
@@ -121,6 +124,7 @@ case class SlothHashAggregateExec (
           deleteRows,
           updateRows,
           stateMemory,
+          numGroups,
           stateInfo,
           storeConf,
           hadoopConfBcast.value.value,

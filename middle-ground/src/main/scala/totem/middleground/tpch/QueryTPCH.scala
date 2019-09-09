@@ -445,10 +445,11 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
         doubleSum($"ps_supplycost" * $"ps_availqty").as("value"))
       .join(subquery, $"value" > $"small_value", "cross")
       .select($"ps_partkey", $"value")
-    //  .orderBy(desc("value"))
+     // .orderBy(desc("value"))
 
     // result.explain()
     DataUtils.writeToSink(result, query_name)
+    // DataUtils.writeToSink(subquery, query_name)
   }
 
   def execQ12(spark: SparkSession): Unit = {

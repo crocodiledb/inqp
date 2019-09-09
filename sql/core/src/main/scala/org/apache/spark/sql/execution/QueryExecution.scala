@@ -217,6 +217,44 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     plan.children.foreach(plan => setAllProjId(runId, plan, microExec))
   }
 
+  private def filterEqual(filterA: SlothFilterExec, filterB: SlothFilterExec): Boolean = {
+    val childA = filterA.child.output
+    val childB = filterB.child.output
+    val conditionA = filterA.condition
+    val conditionB = filterB.condition
+
+    return (!childA.zip(childB).exists(pair => !pair._1.semanticEquals(pair._2)) &&
+      conditionA.semanticEquals(conditionB))
+  }
+
+  private def findFilter(filter: SlothFilterExec, microExec: MicroBatchExecution): Long = {
+    val pair = microExec.filterArray.find(pair => filterEqual(pair._1, filter))
+    if (pair.isDefined) pair.get._2
+    else -1
+  }
+
+  private def assignFilterId(runId: UUID, filter: SlothFilterExec,
+                           microExec: MicroBatchExecution): Unit = {
+    val curFilterId = findFilter(filter, microExec)
+    // New one, first run
+    if (curFilterId == -1 && microExec.currentBatchId < 1) {
+      filter.setID(microExec.filterId, runId)
+      microExec.filterArray.append(new Tuple2(filter, microExec.filterId))
+      microExec.filterId = microExec.filterId + 1
+    } else {
+      if (curFilterId == -1) filter.setID(-1, runId)
+      else filter.setID(curFilterId, runId)
+    }
+  }
+
+  private def setAllFilterId(runId: UUID, plan: SparkPlan, microExec: MicroBatchExecution): Unit = {
+    if (plan == null) return
+    if (plan.isInstanceOf[SlothFilterExec]) {
+      assignFilterId(runId, plan.asInstanceOf[SlothFilterExec], microExec)
+    }
+    plan.children.foreach(plan => setAllFilterId(runId, plan, microExec))
+  }
+
   private def findAgg(plan: SparkPlan): SlothHashAggregateExec = {
     plan match {
       case aggPlan: SlothHashAggregateExec =>
@@ -226,15 +264,16 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     }
   }
 
-  private def setFinalAggId(plan: SparkPlan): Unit = {
+  private def setFinalAggId(plan: SparkPlan, finalAggStartId: Long): Unit = {
     if (plan == null) return
     plan match {
       case slothFinalAggExec: SlothFinalAggExec =>
         val stateInfo = findAgg(slothFinalAggExec).stateInfo.get
-        slothFinalAggExec.setId(stateInfo.operatorId + 200, stateInfo.queryRunId)
+        slothFinalAggExec.setId(stateInfo.operatorId + finalAggStartId,
+          stateInfo.queryRunId)
       case _ =>
     }
-    plan.children.foreach(setFinalAggId)
+    plan.children.foreach(setFinalAggId(_, finalAggStartId))
   }
 
   private def initialStarupTime = 3000
@@ -317,8 +356,11 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     // Set Proj Id
     setAllProjId(runId, executedPlan, microExec)
 
+    // Set Filter Id
+    setAllFilterId(runId, executedPlan, microExec)
+
     // Set FinalAgg Id
-    setFinalAggId(executedPlan)
+    setFinalAggId(executedPlan, microExec.finalAggStartId)
 
     // Set startup time
     setStartUpTime(executedPlan, microExec.currentBatchId == 0)

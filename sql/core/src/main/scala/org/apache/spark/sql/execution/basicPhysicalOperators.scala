@@ -24,12 +24,14 @@ import scala.concurrent.duration.Duration
 
 import org.apache.spark.{InterruptibleIterator, Partition, SparkContext, TaskContext}
 import org.apache.spark.rdd.{EmptyRDD, PartitionwiseSampledRDD, RDD}
+import org.apache.spark.sql.SlothDBCostModel._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen._
+import org.apache.spark.sql.catalyst.expressions.codegen.Predicate
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.metric.SQLMetrics
-import org.apache.spark.sql.execution.streaming.{SlothRuntime, SlothRuntimeCache, SlothRuntimeOpId, StatefulOperatorStateInfo}
+import org.apache.spark.sql.execution.streaming.{SlothRuntime, SlothRuntimeCache, SlothRuntimeOpId}
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.util.{CompletionIterator, ThreadUtils}
 import org.apache.spark.util.random.{BernoulliCellSampler, PoissonSampler}
@@ -106,31 +108,35 @@ case class SlothProjectExec(projectList: Seq[NamedExpression],
 
     child.execute().mapPartitionsWithIndexInternal { (index, iter) =>
 
-      val opRtID = new SlothRuntimeOpId(opId, queryId)
+      if (iter.isEmpty) Iterator.empty
+      else {
 
-      var projRt =
-        if (opId == -1) null
-        else SlothRuntimeCache.get(opRtID)
-      if (projRt == null) {
-        projRt = new SlothProjectRuntime(
-          UnsafeProjection
-            .create(projectList, child.output, subexpressionEliminationEnabled))
+        val opRtID = new SlothRuntimeOpId(opId, queryId)
+
+        var projRt =
+          if (opId == -1) null
+          else SlothRuntimeCache.get(opRtID)
+        if (projRt == null) {
+          projRt = new SlothProjectRuntime(
+            UnsafeProjection
+              .create(projectList, child.output, subexpressionEliminationEnabled))
+        }
+        val project = projRt.asInstanceOf[SlothProjectRuntime].outputProj
+
+        project.initialize(index)
+        val projIter = iter.map { inputRow =>
+          val projRow = project(inputRow)
+          projRow.setInsert(inputRow.isInsert)
+          projRow.setUpdate(inputRow.isUpdate)
+          projRow
+        }
+
+        def onCompletion: Unit =
+          if (opId != -1) SlothRuntimeCache.put(opRtID, projRt)
+
+        CompletionIterator[InternalRow, Iterator[InternalRow]](
+          projIter, onCompletion)
       }
-      val project = projRt.asInstanceOf[SlothProjectRuntime].outputProj
-
-      project.initialize(index)
-      val projIter = iter.map{ inputRow =>
-        val projRow = project(inputRow)
-        projRow.setInsert(inputRow.isInsert)
-        projRow.setUpdate(inputRow.isUpdate)
-        projRow
-      }
-
-      def onCompletion: Unit =
-        if (opId != -1) SlothRuntimeCache.put(opRtID, projRt)
-
-      CompletionIterator[InternalRow, Iterator[InternalRow]](
-       projIter, onCompletion)
     }
   }
 
@@ -286,6 +292,8 @@ case class FilterExec(condition: Expression, child: SparkPlan)
   override def outputPartitioning: Partitioning = child.outputPartitioning
 }
 
+case class SlothFilterRuntime(predicate: Predicate) extends SlothRuntime
+
 /** Physical plan for Filter. SlothDB: Added MetricsTracker */
 case class SlothFilterExec(condition: Expression, child: SparkPlan)
   extends UnaryExecNode with PredicateHelper with SlothMetricsTracker {
@@ -316,67 +324,125 @@ case class SlothFilterExec(condition: Expression, child: SparkPlan)
   }
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "insert_to_insert" -> SQLMetrics.createAverageMetric(sparkContext, "insert to insert"),
+    "delete_to_delete" -> SQLMetrics.createAverageMetric(sparkContext, "delete to delete"),
+    "update_to_update" -> SQLMetrics.createAverageMetric(sparkContext, "update to update")
+  )
+
+  private var opId: Long = _
+  private var queryId: UUID = _
+
+  def setID(operatorId: Long, queryRunId: UUID): Unit = {
+    this.opId = operatorId
+    this.queryId = queryRunId
+  }
+
+  private var opInput: Array[Long] = _
+  private var opOutput: Array[Long] = _
+
+  private[this] def onCompletion: Unit = {
+    val insert_to_insert = longMetric("insert_to_insert")
+    val delete_to_delete = longMetric("delete_to_delete")
+    val update_to_update = longMetric("update_to_update")
+    if (opOutput(INSERT) == 0) insert_to_insert.set(0)
+    else insert_to_insert.set((opOutput(INSERT)*SF)/opInput(INSERT))
+
+    if (opOutput(DELETE) == 0) delete_to_delete.set(0)
+    else delete_to_delete.set((opOutput(DELETE)*SF)/opInput(DELETE))
+
+    if (opOutput(UPDATE) == 0) update_to_update.set(0)
+    else update_to_update.set((opOutput(UPDATE)*SF)/opInput(UPDATE))
+  }
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
     child.execute().mapPartitionsWithIndexInternal { (index, iter) =>
-      val predicate = newPredicate(condition, child.output)
 
-      predicate.initialize(0)
+      if (iter.isEmpty) Iterator.empty
+      else {
 
-      var deleteRow: UnsafeRow = null
-      var updateCase: Boolean = false
+        val opRtID = new SlothRuntimeOpId(opId, queryId)
 
-      iter.flatMap (row => {
-        val thisRow = row.asInstanceOf[UnsafeRow]
-
-        val isInsert = thisRow.isInsert
-        val isUpdate = thisRow.isUpdate
-        thisRow.cleanStates()
-
-        if (predicate.eval(thisRow)) {
-          if (updateCase) {
-            assert(isInsert,
-              "In the update case, the current row must be an insert")
-            updateCase = false
-            deleteRow.setInsert(false)
-            deleteRow.setUpdate(true)
-            thisRow.setInsert(true)
-            thisRow.setUpdate(false)
-            numOutputRows += 2
-            Seq(deleteRow, thisRow).toIterator
-          } else {
-            // indicating an update case
-            if (!isInsert && isUpdate) {
-              if (deleteRow == null) deleteRow = thisRow.copy()
-              else deleteRow.copyFrom(thisRow)
-              updateCase = true
-              Iterator()
-
-              // ok, a single delete/insert
-            } else {
-              numOutputRows += 1
-              thisRow.setInsert(isInsert)
-              thisRow.setUpdate(false)
-              Seq(thisRow).toIterator
-            }
-          }
-        } else {
-          // originally an update case
-          // but the succeeding insert is filter out
-          if (updateCase) {
-            assert(isInsert,
-              "In the update case, the current row must be an insert")
-            numOutputRows += 1
-            updateCase = false
-
-            deleteRow.setInsert(false)
-            deleteRow.setUpdate(false)
-            Seq(deleteRow)
-          } else Iterator()
+        var filterRt =
+          if (opId == -1) null
+          else SlothRuntimeCache.get(opRtID)
+        if (filterRt == null) {
+          val tmpPredicate = newPredicate(condition, child.output)
+          tmpPredicate.initialize(0)
+          filterRt = new SlothFilterRuntime(tmpPredicate)
         }
-      })
+
+        val predicate = filterRt.asInstanceOf[SlothFilterRuntime].predicate
+
+        var deleteRow: UnsafeRow = null
+        var updateCase: Boolean = false
+
+        opOutput = new Array[Long](OPERATION_SIZE)
+        opInput = new Array[Long](OPERATION_SIZE)
+
+        val resIter = iter.flatMap(row => {
+          val thisRow = row.asInstanceOf[UnsafeRow]
+
+          val isInsert = thisRow.isInsert
+          val isUpdate = thisRow.isUpdate
+          thisRow.cleanStates()
+
+          if (isInsert && !updateCase) opInput(INSERT) += 1
+          else if (!isInsert && !isUpdate) opInput(DELETE) += 1
+          else if (!isInsert && isUpdate) opInput(UPDATE) += 1
+
+          if (predicate.eval(thisRow)) {
+
+            if (isInsert && !updateCase) opOutput(INSERT) += 1
+            else if (!isInsert && !isUpdate) opOutput(DELETE) += 1
+            else if (!isInsert && isUpdate) opOutput(UPDATE) += 1
+
+            if (updateCase) {
+              assert(isInsert,
+                "In the update case, the current row must be an insert")
+              updateCase = false
+              deleteRow.setInsert(false)
+              deleteRow.setUpdate(true)
+              thisRow.setInsert(true)
+              thisRow.setUpdate(false)
+              numOutputRows += 2
+              Seq(deleteRow, thisRow).toIterator
+            } else {
+              // indicating an update case
+              if (!isInsert && isUpdate) {
+                if (deleteRow == null) deleteRow = thisRow.copy()
+                else deleteRow.copyFrom(thisRow)
+                updateCase = true
+                Iterator()
+
+                // ok, a single delete/insert
+              } else {
+                numOutputRows += 1
+                thisRow.setInsert(isInsert)
+                thisRow.setUpdate(false)
+                Seq(thisRow).toIterator
+              }
+            }
+          } else {
+            // originally an update case
+            // but the succeeding insert is filter out
+            if (updateCase) {
+              assert(isInsert,
+                "In the update case, the current row must be an insert")
+              numOutputRows += 1
+              updateCase = false
+
+              deleteRow.setInsert(false)
+              deleteRow.setUpdate(false)
+              Seq(deleteRow)
+            } else Iterator()
+          }
+        })
+
+        CompletionIterator[InternalRow, Iterator[InternalRow]](resIter, onCompletion)
+
+      }
     }
   }
 

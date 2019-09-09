@@ -18,6 +18,7 @@
 package org.apache.spark.sql.execution.streaming
 
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SlothDBCostModel._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, GenericInternalRow, JoinedRow, Literal, UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.catalyst.plans._
@@ -164,7 +165,19 @@ case class SlothSymmetricHashJoinExec(
     "deleteRows" -> SQLMetrics.createMetric(sparkContext, "number of deletes output"),
     "updateRows" -> SQLMetrics.createMetric(sparkContext, "number of updates output"),
     "commitTimeMs" -> SQLMetrics.createTimingMetric(sparkContext, "commit time"),
-    "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory")
+    "stateMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory"),
+    "left_insert_to_insert" -> SQLMetrics
+      .createAverageMetric(sparkContext, "insert to insert match"),
+    "left_delete_to_delete" -> SQLMetrics
+      .createAverageMetric(sparkContext, "delete to delete match"),
+    "left_update_to_update" -> SQLMetrics
+      .createAverageMetric(sparkContext, "update to update match"),
+    "right_insert_to_insert" -> SQLMetrics
+      .createAverageMetric(sparkContext, "insert to insert match"),
+    "right_delete_to_delete" -> SQLMetrics
+      .createAverageMetric(sparkContext, "delete to delete match"),
+    "right_update_to_update" -> SQLMetrics
+      .createAverageMetric(sparkContext, "update to update match")
   )
 
   private val storeConf = new StateStoreConf(sqlContext.conf)
@@ -245,6 +258,12 @@ case class SlothSymmetricHashJoinExec(
     val updateRows = longMetric("updateRows")
     val commitTimeMs = longMetric("commitTimeMs")
     val stateMemory = longMetric("stateMemory")
+    val left_insert_to_insert = longMetric("left_insert_to_insert")
+    val left_delete_to_delete = longMetric("left_delete_to_delete")
+    val left_update_to_update = longMetric("left_update_to_update")
+    val right_insert_to_insert = longMetric("right_insert_to_insert")
+    val right_delete_to_delete = longMetric("right_delete_to_delete")
+    val right_update_to_update = longMetric("right_update_to_update")
 
     val joinedRow1 = new JoinedRow
     val joinedRow2 = new JoinedRow
@@ -324,16 +343,34 @@ case class SlothSymmetricHashJoinExec(
         joinedRow2.withLeft(matched).withRight(input)
       })
 
+    def onLeftCompletion: Unit = {
+      left_insert_to_insert.set(leftSideJoiner.getInsertProb(rightSideJoiner))
+      left_delete_to_delete.set(leftSideJoiner.getDeleteProb(rightSideJoiner))
+      left_update_to_update.set(leftSideJoiner.getUpdateProb(rightSideJoiner))
+    }
+
+    def onRightCompletion: Unit = {
+      right_insert_to_insert.set(rightSideJoiner.getInsertProb(leftSideJoiner))
+      right_delete_to_delete.set(rightSideJoiner.getDeleteProb(leftSideJoiner))
+      right_update_to_update.set(rightSideJoiner.getUpdateProb(leftSideJoiner))
+    }
+
+    val wrapLeftInnerIter = CompletionIterator[InternalRow, Iterator[InternalRow]](
+      leftInnerIter, onLeftCompletion)
+
+    val wrapRightInnerIter = CompletionIterator[InternalRow, Iterator[InternalRow]](
+      rightInnerIter, onRightCompletion)
+
     // TODO: remove stale state when a window is closed
     val outputIter: Iterator[InternalRow] = joinType match {
       case Inner | LeftSemi =>
-        leftInnerIter ++ rightInnerIter
+        wrapLeftInnerIter ++ wrapRightInnerIter
       case LeftOuter | LeftAnti =>
         // Run right iterator first
-        rightInnerIter ++ leftInnerIter
+        wrapRightInnerIter ++ wrapLeftInnerIter
       case RightOuter =>
         // Run left iterator first
-        leftInnerIter ++ rightInnerIter
+        wrapLeftInnerIter ++ wrapRightInnerIter
       case FullOuter =>
         // Run left iterator first, but does not output tuples with nulls
         // When right iterator finished, scan left state to output tuples with nulls
@@ -347,7 +384,7 @@ case class SlothSymmetricHashJoinExec(
             joinedRow1.withLeft(leftSideJoiner.getRawValue(kvRow.valueWithCounter))
               .withRight(nullRight)
           })
-        leftInnerIter ++ rightInnerIter ++ leftOuterIter
+        wrapLeftInnerIter ++ wrapRightInnerIter ++ leftOuterIter
       case _ => throwBadJoinTypeException()
     }
 
@@ -437,6 +474,13 @@ case class SlothSymmetricHashJoinExec(
     // }
 
     private[this] var updatedStateRowsCount = 0
+
+    private[this] var insertOutput = 0L
+    private[this] var deleteOutput = 0L
+    private[this] var updateOutput = 0L
+    private[this] var insertInput = 0L
+    private[this] var deleteInput = 0L
+    private[this] var updateInput = 0L
 
     private[this] val nullDeleteJoinedRow = new JoinedRow()
     private[this] val nullInsertJoinedRow = new JoinedRow()
@@ -609,6 +653,14 @@ case class SlothSymmetricHashJoinExec(
         })
     }
 
+    private def hasNullRow(joinedRow: JoinedRow): Boolean = {
+      if (joinedRow.getLeft == nullLeft || joinedRow.getRight == nullRight) {
+        return true
+      } else {
+        return false
+      }
+    }
+
     private val InnerPlusOuterJoinOneRow = (thisRow: UnsafeRow,
                    deleteRow: UnsafeRow,
                    isInsert: Boolean,
@@ -631,8 +683,12 @@ case class SlothSymmetricHashJoinExec(
            if (recentRow == null) recentRow = joinStateManager.getMostRecent(key)
            incCounter(recentRow)
            otherSideJoiner.incCounter(thatRowWithCounter)
+
+           if (!updateCase) insertOutput += 1
          } else {
            otherSideJoiner.decCounter(thatRowWithCounter)
+
+           deleteOutput += 1
          }
         joinedRow
       }}
@@ -668,14 +724,22 @@ case class SlothSymmetricHashJoinExec(
           // Generate rows with nulls
           outerIter = outerIter ++ deleteGenNullIter(otherSideJoiner, deleteKey)
           outerIter = outerIter ++ insertGenNullIter(insertKey)
-          outerIter = outerIter.filter(postJoinFilter)
+          outerIter = outerIter.filter(postJoinFilter).map(joinedRow => {
+            if (!hasNullRow(joinedRow)) updateOutput += 1
+            joinedRow
+          })
 
         } else { // Updates on non-key columns, counters unchanged
           val valueWithCounter = joinStateManager.get(deleteKey, deleteRow)
           if (getCounter(valueWithCounter) == -1) {
             outerIter = outerIter ++ genOuterJoinUpdateIter(insertKey, insertRow, deleteRow)
           }
-          outerIter = outerIter ++ generateUpdateIter(deleteIter, insertIter, postJoinFilter)
+          outerIter = outerIter ++
+            generateUpdateIter(deleteIter, insertIter, postJoinFilter)
+              .map(joinedRow => {
+                updateOutput += 1
+                joinedRow
+              })
         }
 
         updatedStateRowsCount += 2
@@ -1097,6 +1161,7 @@ case class SlothSymmetricHashJoinExec(
               s"On ${joinSide} with ${rightKeys} of ${condition}: " +
                 s"in the update case, the current row must be an insert")
             updateCase = false
+            updateInput += 1
             joinOneRow(thisRow, deleteRow, isInsert, true, otherSideJoiner,
               generateJoinedRow1, generateJoinedRow2)
           } else {
@@ -1107,6 +1172,8 @@ case class SlothSymmetricHashJoinExec(
               else deleteRow.copyFrom(thisRow)
               Iterator()
             } else {
+              if (isInsert) insertInput += 1
+              else deleteInput += 1
               joinOneRow(thisRow, deleteRow, isInsert, false, otherSideJoiner,
                 generateJoinedRow1, generateJoinedRow2)
             }
@@ -1192,6 +1259,23 @@ case class SlothSymmetricHashJoinExec(
 
     def getRawValue(valueWithCounter: UnsafeRow): UnsafeRow = {
       valueRowGenerator(valueWithCounter)
+    }
+
+    def getInsertProb(otherSideJoiner: OneSideHashJoiner): Long = {
+      if (insertOutput == 0) return 0
+      else return (insertOutput * SF)/(insertInput * otherSideJoiner.joinStateManager.getStateSize)
+    }
+
+    def getDeleteProb(otherSideJoiner: OneSideHashJoiner): Long = {
+      if (deleteOutput == 0) return 0
+      else return (deleteOutput * SF)/(deleteInput * otherSideJoiner.joinStateManager.getStateSize)
+    }
+
+    def getUpdateProb(otherSideJoiner: OneSideHashJoiner): Long = {
+      if (updateOutput == 0) return 0
+      else {
+        return (updateOutput * SF)/(2 * updateInput * otherSideJoiner.joinStateManager.getStateSize)
+      }
     }
 
   }
