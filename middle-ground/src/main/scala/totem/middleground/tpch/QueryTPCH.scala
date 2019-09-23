@@ -24,27 +24,54 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
 
 class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
-                 shuffleNum: String, statDIR: String, SF: Double,
-                 hdfsRoot: String, incrementability: String, inputPartitions: Int)
+                 shuffleNum: String, statDIR: String, SF: Double, hdfsRoot: String,
+                 execution_mode: String, inputPartitions: Int, constraint: String,
+                 largeDataset: Boolean, iOLAPConf: Int, iOLAPRoot: String)
 {
+  val iOLAP_Q11_src = "/q11_config.csv"
+  val iOLAP_Q17_src = "/q17_config.csv"
+  val iOLAP_Q18_src = "/q18_config.csv"
+  val iOLAP_Q20_src = "/q20_config.csv"
+  val iOLAP_Q22_src = "/q22_config.csv"
+
+  val iOLAP_Q11_dst = "/iOLAP/q11_config.dst"
+  val iOLAP_Q17_dst = "/iOLAP/q17_config.dst"
+  val iOLAP_Q18_dst = "/iOLAP/q18_config.dst"
+  val iOLAP_Q20_dst = "/iOLAP/q20_config.dst"
+  val iOLAP_Q22_dst = "/iOLAP/q22_config.dst"
+
+  val iOLAP_ON = 0
+  val iOLAP_OFF = 1
+  val iOLAP_TRAINING = 2
 
   DataUtils.bootstrap = bootstrap
-  TPCHSchema.setQueryMetaData(numBatch, SF, hdfsRoot, inputPartitions)
+  TPCHSchema.setQueryMetaData(numBatch, SF, hdfsRoot, inputPartitions, largeDataset)
 
   private var query_name: String = null
 
+  val enable_iOLAP =
+    if (iOLAPConf == iOLAP_ON) "true"
+    else "false"
+
   def execQuery(query: String): Unit = {
+    query_name = query.toLowerCase
+
     val sparkConf = new SparkConf()
       .set(SQLConf.SHUFFLE_PARTITIONS.key, shuffleNum)
       .set(SQLConf.SLOTHDB_STAT_DIR.key, statDIR)
-      .set(SQLConf.SLOTHDB_ENABLE_INCREMENTABILITY.key, incrementability)
+      .set(SQLConf.SLOTHDB_EXECUTION_MODE.key, execution_mode)
+      .set(SQLConf.SLOTHDB_BATCH_NUM.key, numBatch.toString)
+      .set(SQLConf.SLOTHDB_IOLAP.key, enable_iOLAP)
+      .set(SQLConf.SLOTHDB_QUERYNAME.key, query_name)
+
+    val digit_constraint = constraint.toDouble
+    if (digit_constraint <= 1.0) sparkConf.set(SQLConf.SLOTHDB_LATENCY_CONSTRAINT.key, constraint)
+    else sparkConf.set(SQLConf.SLOTHDB_RESOURCE_CONSTRAINT.key, constraint)
 
     val spark = SparkSession.builder()
       .config(sparkConf)
       .appName("Executing Query " + query)
       .getOrCreate()
-
-    query_name = query.toLowerCase
 
     query_name match {
       case "q1" =>
@@ -98,7 +125,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       case "q_static" =>
         execStatic(spark)
       case _ =>
-        printf("Not yet supported %s", query)
+        printf("Not yet supported %s\n", query)
     }
   }
 
@@ -436,20 +463,40 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val n = DataUtils.loadStreamTable(spark, "nation", "n")
       .filter($"n_name" === "GERMANY")
 
-    val subquery = execQ11_subquery(spark);
+    val subquery = execQ11_subquery(spark)
 
-    val result = s.join(n, $"s_nationkey" === $"n_nationkey")
-      .join(ps, $"s_suppkey" === $"ps_suppkey")
-      .groupBy($"ps_partkey")
-      .agg(
-        doubleSum($"ps_supplycost" * $"ps_availqty").as("value"))
-      .join(subquery, $"value" > $"small_value", "cross")
-      .select($"ps_partkey", $"value")
-     // .orderBy(desc("value"))
+    if (iOLAPConf == iOLAP_TRAINING) {
+      DataUtils.writeToSink(subquery.agg(min($"small_value"), max($"small_value")), query_name)
+    } else {
+      val result =
+        s.join(n, $"s_nationkey" === $"n_nationkey")
+          .join(ps, $"s_suppkey" === $"ps_suppkey")
+          .groupBy($"ps_partkey")
+          .agg(
+            doubleSum($"ps_supplycost" * $"ps_availqty").as("value"))
+          .join(subquery, $"value" > $"small_value", "cross")
+          .select($"ps_partkey", $"value")
 
-    // result.explain()
-    DataUtils.writeToSink(result, query_name)
-    // DataUtils.writeToSink(subquery, query_name)
+        // if (iOLAPConf == iOLAP_ON) {
+        //   val small_value = DataUtils.loadIOLAPDoubleTable(spark, iOLAPRoot + iOLAP_Q11_src)
+
+        //   s.join(n, $"s_nationkey" === $"n_nationkey")
+        //   .join(ps, $"s_suppkey" === $"ps_suppkey")
+        //   .groupBy($"ps_partkey")
+        //   .agg(
+        //     doubleSum($"ps_supplycost" * $"ps_availqty").as("value"))
+        //   .filter($"value" > small_value)
+        //   .join(subquery, $"value" > $"small_value", "cross")
+        //   .select($"ps_partkey", $"value")
+
+        // } else {
+
+        // }
+
+      // .orderBy(desc("value"))
+      // result.explain()
+      DataUtils.writeToSink(result, query_name)
+    }
   }
 
   def execQ12(spark: SparkSession): Unit = {
@@ -573,7 +620,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val result = ps.join(p, $"ps_partkey" === $"p_partkey")
       .join(s, $"ps_suppkey" === $"s_suppkey", "left_anti")
       .select($"p_brand", $"p_type", $"p_size", $"ps_suppkey")
-      .dropDuplicates()
+      // .dropDuplicates()
       .groupBy($"p_brand", $"p_type", $"p_size")
       .agg(supplier_cnt($"ps_suppkey").as("supplier_cnt"))
     //  .orderBy(desc("supplier_cnt"), $"p_brand", $"p_type", $"p_size")
@@ -592,20 +639,44 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val p = DataUtils.loadStreamTable(spark, "part", "p")
       .filter($"p_brand" === "Brand#23" and $"p_container" === "MED BOX")
 
-    // val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
-    val agg_l = l.groupBy($"l_partkey")
-      .agg(
-        (doubleAvg($"l_quantity") * 0.2).as("avg_quantity"))
+    val agg_l = DataUtils.loadStreamTable(spark, "lineitem", "l")
+      .groupBy($"l_partkey")
+      .agg((doubleAvg($"l_quantity") * 0.2).as("avg_quantity"))
       .select($"l_partkey".as("agg_l_partkey"), $"avg_quantity")
 
-    val result = agg_l.join(l, $"agg_l_partkey" === $"l_partkey" and
-      $"l_quantity" < $"avg_quantity")
-      .join(p, $"l_partkey" === $"p_partkey")
-      .agg(
-        (doubleSum($"l_extendedprice") / 7.0).as("avg_yearly"))
+    if (iOLAPConf == iOLAP_TRAINING) {
+      val tmpDF = l.join(agg_l, $"l_partkey" === $"agg_l_partkey"
+        and $"l_quantity" < $"avg_quantity").select($"l_partkey")
+        .dropDuplicates()
 
-    // result.explain(false)
-    DataUtils.writeToSink(result, query_name)
+      val fullP = DataUtils.loadStreamTable(spark, "part", "p")
+      val result = fullP.join(tmpDF, $"p_partkey" === $"l_partkey", "left_anti")
+          .select($"p_partkey")
+
+      DataUtils.writeToFile(result, query_name, hdfsRoot + iOLAP_Q17_dst)
+
+    } else {
+      val result =
+        l.join(agg_l, $"l_partkey" === $"agg_l_partkey"
+            and $"l_quantity" < $"avg_quantity")
+            .join(p, $"l_partkey" === $"p_partkey")
+            .agg((doubleSum($"l_extendedprice") / 7.0).as("avg_yearly"))
+
+        // if (iOLAPConf == iOLAP_ON) {
+        //   val keyArray = DataUtils.loadIOLAPLongTable(spark, iOLAPRoot + iOLAP_Q17_src)
+
+        //   l.filter(!($"l_partkey".isInCollection(keyArray)))
+        //     .join(agg_l, $"l_partkey" === $"agg_l_partkey"
+        //       and $"l_quantity" < $"avg_quantity")
+        //     .join(p, $"l_partkey" === $"p_partkey")
+        //     .agg((doubleSum($"l_extendedprice") / 7.0).as("avg_yearly"))
+
+        // } else {
+        // }
+
+      DataUtils.writeToSink(result, query_name)
+
+    }
   }
 
   def execQ18(spark: SparkSession): Unit = {
@@ -623,15 +694,32 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .filter($"sum_quantity" > 300)
       .select($"l_orderkey".as("agg_orderkey"))
 
-    val result = o.join(agg_l, $"o_orderkey" === $"agg_orderkey", "left_semi")
-      .join(l, $"o_orderkey" === $"l_orderkey")
-      .join(c, $"o_custkey" === $"c_custkey")
-      .groupBy("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
-      .agg(doubleSum2($"l_quantity"))
-    //  .orderBy(desc("o_totalprice"), $"o_orderdate")
+    if (iOLAPConf == iOLAP_TRAINING) {
+       DataUtils.writeToFile(agg_l, query_name, hdfsRoot + iOLAP_Q18_dst)
+    } else {
+      val result =
+        o.join(agg_l, $"o_orderkey" === $"agg_orderkey", "left_semi")
+            .join(l, $"o_orderkey" === $"l_orderkey")
+            .join(c, $"o_custkey" === $"c_custkey")
+            .groupBy("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
+            .agg(doubleSum2($"l_quantity"))
 
-    // result.explain(true)
-    DataUtils.writeToSink(result, query_name)
+        // if (iOLAPConf == iOLAP_ON) {
+        //   val keyArray = DataUtils.loadIOLAPLongTable(spark, iOLAPRoot + iOLAP_Q18_src)
+
+        //   o.filter($"o_orderkey".isInCollection(keyArray))
+        //     .join(agg_l, $"o_orderkey" === $"agg_orderkey", "left_semi")
+        //     .join(l, $"o_orderkey" === $"l_orderkey")
+        //     .join(c, $"o_custkey" === $"c_custkey")
+        //     .groupBy("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
+        //     .agg(doubleSum2($"l_quantity"))
+        // } else {
+        // }
+      //  .orderBy(desc("o_totalprice"), $"o_orderdate")
+
+      // result.explain(true)
+      DataUtils.writeToSink(result, query_name)
+    }
   }
 
   def execQ19(spark: SparkSession): Unit = {
@@ -694,11 +782,24 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val n = DataUtils.loadStreamTable(spark, "nation", "n")
       .filter($"n_name" === "CANADA")
 
-    val result = s.join(subquery, $"s_suppkey" === $"ps_suppkey", "left_semi")
-      .join(n, $"s_nationkey" === $"n_nationkey")
-      .select($"s_name", $"s_address")
+    if (iOLAPConf == iOLAP_TRAINING) {
+      DataUtils.writeToFile(subquery, query_name, hdfsRoot + iOLAP_Q20_dst)
+    } else {
+      val result =
+        s.join(subquery, $"s_suppkey" === $"ps_suppkey", "left_semi")
+            .join(n, $"s_nationkey" === $"n_nationkey")
+            .select($"s_name", $"s_address")
+        // if (iOLAPConf == iOLAP_ON) {
+        //   val keyArray = DataUtils.loadIOLAPLongTable(spark, iOLAPRoot + iOLAP_Q20_src)
+        //   s.filter($"s_suppkey".isInCollection(keyArray))
+        //     .join(subquery, $"s_suppkey" === $"ps_suppkey", "left_semi")
+        //     .join(n, $"s_nationkey" === $"n_nationkey")
+        //     .select($"s_name", $"s_address")
+        // } else {
+        // }
 
-    DataUtils.writeToSink(result, query_name)
+      DataUtils.writeToSink(result, query_name)
+    }
   }
 
   def execQ21(spark: SparkSession): Unit = {
@@ -759,16 +860,34 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
 
     val o = DataUtils.loadStreamTable(spark, "orders", "o")
 
-    val result = c.join(subquery1, $"c_acctbal" > $"avg_acctbal", "cross")
-       .join(o, $"c_custkey" === $"o_custkey", "left_anti")
-       .select(substring($"c_phone", 1, 2).as("cntrycode"), $"c_acctbal")
-       .groupBy($"cntrycode")
-       .agg(numcust(lit(1)).as("numcust"),
-         doubleSum($"c_acctbal").as("totalacctbal"))
-       // .orderBy($"cntrycode")
+    if (iOLAPConf == iOLAP_TRAINING) {
+      DataUtils.writeToSink(subquery1.agg(min($"avg_acctbal"), max($"avg_acctbal")), query_name)
+    } else {
+      val result =
+        c.join(o, $"c_custkey" === $"o_custkey", "left_anti")
+          .join(subquery1, $"c_acctbal" > $"avg_acctbal", "cross")
+          .select(substring($"c_phone", 1, 2).as("cntrycode"), $"c_acctbal")
+          .groupBy($"cntrycode")
+          .agg(numcust(lit(1)).as("numcust"),
+            doubleSum($"c_acctbal").as("totalacctbal"))
 
-    // result.explain(true)
-    DataUtils.writeToSink(result, query_name)
+        // if (iOLAPConf == iOLAP_ON) {
+        //   val bal = DataUtils.loadIOLAPDoubleTable(spark, iOLAPRoot + iOLAP_Q22_src)
+
+        //   c.filter($"c_acctbal" > bal)
+        //     .join(o, $"c_custkey" === $"o_custkey", "left_anti")
+        //     .join(subquery1, $"c_acctbal" > $"avg_acctbal", "cross")
+        //     .select(substring($"c_phone", 1, 2).as("cntrycode"), $"c_acctbal")
+        //     .groupBy($"cntrycode")
+        //     .agg(numcust(lit(1)).as("numcust"),
+        //       doubleSum($"c_acctbal").as("totalacctbal"))
+        // } else {
+        // }
+
+       // .orderBy($"cntrycode")
+       // result.explain(true)
+      DataUtils.writeToSink(result, query_name)
+    }
   }
 
   def execHighBalance(spark: SparkSession): Unit = {
@@ -820,15 +939,18 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
 object QueryTPCH {
   def main(args: Array[String]): Unit = {
 
-    if (args.length < 7) {
+    if (args.length < 13) {
       System.err.println("Usage: QueryTPCH <bootstrap-servers> <query>" +
         "<numBatch> <number-shuffle-partition> <statistics dir> <SF> <HDFS root>" +
-        "<Enable Incrementability> <num of input partitions>")
+        "<execution mode [0: inc-aware(subpath), 1: inc-aware(subplan), 2: inc-oblivious, " +
+        "3: generate inc statistics, 4: training]>  <num of input partitions>" +
+        "<performance constraint> <large dataset> <iOLAP Config> <iOLAP root>")
       System.exit(1)
     }
 
     val tpch = new QueryTPCH(args(0), args(1), args(2).toInt, args(3),
-      args(4), args(5).toDouble, args(6), args(7), args(8).toInt)
+      args(4), args(5).toDouble, args(6), args(7), args(8).toInt, args(9),
+      args(10).toBoolean, args(11).toInt, args(12))
     tpch.execQuery(args(1))
   }
 }

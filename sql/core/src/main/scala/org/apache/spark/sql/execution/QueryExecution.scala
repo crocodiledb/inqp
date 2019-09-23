@@ -112,6 +112,8 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     plan match {
       case scan: DataSourceV2ScanExec =>
         return scan.partitions.size
+      case localScan: LocalTableScanExec =>
+        return 1
       case _ =>
     }
 
@@ -323,7 +325,7 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     plan.children.foreach(child => setFirstBatch(child, isFirstBatch))
   }
 
-  private def setRepairMode(plan: SparkPlan, repairMode: Boolean): Unit = {
+  def setRepairMode(plan: SparkPlan, repairMode: Boolean): Unit = {
     if (plan == null) return
     plan match {
       case slothHash: SlothHashAggregateExec =>
@@ -369,12 +371,12 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     setFirstBatch(executedPlan, microExec.currentBatchId == 0)
 
     // Set repair mode
-    val repairConf = sparkSession.conf.get(SQLConf.SLOTHDB_ENABLE_INCREMENTABILITY)
-    if (repairConf.isDefined && repairConf.get) {
-      setRepairMode(executedPlan, microExec.currentBatchId == 0 || microExec.isLastBatch)
-    } else {
-      setRepairMode(executedPlan, true)
-    }
+    // val repairConf = sparkSession.conf.get(SQLConf.SLOTHDB_ENABLE_INCREMENTABILITY)
+    // if (repairConf.isDefined && repairConf.get) {
+    //   setRepairMode(executedPlan, microExec.currentBatchId == 0 || microExec.isLastBatch)
+    // } else {
+    //   setRepairMode(executedPlan, true)
+    // }
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be

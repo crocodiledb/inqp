@@ -184,7 +184,7 @@ case class SlothSimpleHashJoinExec(
 
       hashRunTime = new SlothHashJoinRuntime(
         outputProj, postJoinFilter, leftKeyProj, leftDeleteKeyProj, leftRowGen, leftStateManager,
-        rightKeyProj, rightDeleteKeyProj, rightRowGen, rightStateManager)
+        rightKeyProj, rightDeleteKeyProj, rightRowGen, rightStateManager, null)
     } else {
       hashRunTime = opRunTime.asInstanceOf[SlothHashJoinRuntime]
 

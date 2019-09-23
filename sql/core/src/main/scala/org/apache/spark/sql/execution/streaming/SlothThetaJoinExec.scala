@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.execution.streaming
 
+import java.io.{BufferedReader, FileReader}
+
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SlothDBCostModel._
 import org.apache.spark.sql.catalyst.InternalRow
@@ -28,7 +30,7 @@ import org.apache.spark.sql.execution.{BinaryExecNode, SlothMetricsTracker, Slot
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper._
 import org.apache.spark.sql.execution.streaming.state._
-import org.apache.spark.sql.internal.SessionState
+import org.apache.spark.sql.internal.{SessionState, SQLConf}
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.util.{CompletionIterator, SerializableConfiguration}
 
@@ -74,6 +76,8 @@ case class SlothThetaJoinExec (
       s"${getClass.getSimpleName} should not take $joinType as the JoinType")
   }
 
+  val leftOutput = left.output
+
   require(
     joinType == Cross,
     s"${getClass.getSimpleName} should not take $joinType as the JoinType in ThetaJoin")
@@ -103,6 +107,13 @@ case class SlothThetaJoinExec (
   private val hadoopConfBcast = sparkContext.broadcast(
     new SerializableConfiguration(SessionState.newHadoopConf(
       sparkContext.hadoopConfiguration, sqlContext.conf)))
+
+  private val enableIOLAP =
+    sqlContext.sparkSession.conf.get(SQLConf.SLOTHDB_IOLAP).getOrElse(false)
+  private val query_name =
+    sqlContext.sparkSession.conf.get(SQLConf.SLOTHDB_QUERYNAME).get
+  private val statRoot =
+    sqlContext.sparkSession.conf.get(SQLConf.SLOTHDB_STAT_DIR).get
 
   override def requiredChildDistribution: Seq[Distribution] = {
     UnspecifiedDistribution :: new SlothBroadcastDistribution() :: Nil
@@ -149,7 +160,7 @@ case class SlothThetaJoinExec (
       throw new IllegalStateException(s"Cannot execute join as state info was not specified\n$this")
     }
 
-    // if (leftInputIter.isEmpty && rightInputIter.isEmpty) return Iterator.empty
+    iOLAPFilter = getIOLAPFilter()
 
     val numOutputRows = longMetric("numOutputRows")
     val deleteRows = longMetric("deleteRows")
@@ -189,52 +200,42 @@ case class SlothThetaJoinExec (
       thetaRunTime.rightStateManager.reInit(stateInfo, storeConf, hadoopConfBcast.value.value)
     }
 
-    if (leftInputIter.isEmpty && rightInputIter.isEmpty) {
-      thetaRunTime.leftStateManager.commit()
-      thetaRunTime.rightStateManager.commit()
-      thetaRunTime.leftStateManager.purgeState()
-      thetaRunTime.rightStateManager.purgeState()
-      SlothRuntimeCache.put(opRtId, thetaRunTime)
+    val leftSideJoiner = new OneSideThetaJoiner(
+      LeftSide, left.output, leftKeys, leftInputIter, condition.leftSideOnly,
+      thetaRunTime.postFilterFunc, stateWatermarkPredicates.left, thetaRunTime.leftStateManager)
+    val rightSideJoiner = new OneSideThetaJoiner(
+      RightSide, right.output, rightKeys, rightInputIter, condition.rightSideOnly,
+      thetaRunTime.postFilterFunc, stateWatermarkPredicates.right, thetaRunTime.rightStateManager)
 
-      return Iterator.empty
-    } else {
+    //  Join one side input using the other side's buffered/state rows. Here is how it is done.
+    //
+    //  - `leftJoiner.joinWith(rightJoiner)` generates all rows from matching new left input with
+    //    stored right input, and also stores all the left input
+    //
+    //  - `rightJoiner.joinWith(leftJoiner)` generates all rows from matching new right input with
+    //    stored left input, and also stores all the right input. It also generates all rows from
+    //    matching new left input with new right input, since the new left input has become stored
+    //    by that point. This tiny asymmetry is necessary to avoid duplication.
+    val leftOutputIter = leftSideJoiner.storeAndJoinWithOtherSide(rightSideJoiner,
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow1.cleanStates()
+        joinedRow1.withLeft(input).withRight(matched)
+      },
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow2.cleanStates()
+        joinedRow2.withLeft(input).withRight(matched)
+      }
+    )
 
-      val leftSideJoiner = new OneSideThetaJoiner(
-        LeftSide, left.output, leftKeys, leftInputIter, condition.leftSideOnly,
-        thetaRunTime.postFilterFunc, stateWatermarkPredicates.left, thetaRunTime.leftStateManager)
-      val rightSideJoiner = new OneSideThetaJoiner(
-        RightSide, right.output, rightKeys, rightInputIter, condition.rightSideOnly,
-        thetaRunTime.postFilterFunc, stateWatermarkPredicates.right, thetaRunTime.rightStateManager)
-
-      //  Join one side input using the other side's buffered/state rows. Here is how it is done.
-      //
-      //  - `leftJoiner.joinWith(rightJoiner)` generates all rows from matching new left input with
-      //    stored right input, and also stores all the left input
-      //
-      //  - `rightJoiner.joinWith(leftJoiner)` generates all rows from matching new right input with
-      //    stored left input, and also stores all the right input. It also generates all rows from
-      //    matching new left input with new right input, since the new left input has become stored
-      //    by that point. This tiny asymmetry is necessary to avoid duplication.
-      val leftOutputIter = leftSideJoiner.storeAndJoinWithOtherSide(rightSideJoiner,
-        (input: InternalRow, matched: InternalRow) => {
-          joinedRow1.cleanStates()
-          joinedRow1.withLeft(input).withRight(matched)
-        },
-        (input: InternalRow, matched: InternalRow) => {
-          joinedRow2.cleanStates()
-          joinedRow2.withLeft(input).withRight(matched)
-        }
-      )
-
-      val rightOutputIter = rightSideJoiner.storeAndJoinWithOtherSide(leftSideJoiner,
-        (input: InternalRow, matched: InternalRow) => {
-          joinedRow1.cleanStates()
-          joinedRow1.withLeft(matched).withRight(input)
-        },
-        (input: InternalRow, matched: InternalRow) => {
-          joinedRow2.cleanStates()
-          joinedRow2.withLeft(matched).withRight(input)
-        })
+    val rightOutputIter = rightSideJoiner.storeAndJoinWithOtherSide(leftSideJoiner,
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow1.cleanStates()
+        joinedRow1.withLeft(matched).withRight(input)
+      },
+      (input: InternalRow, matched: InternalRow) => {
+        joinedRow2.cleanStates()
+        joinedRow2.withLeft(matched).withRight(input)
+      })
 
     def onLeftCompletion: Unit = {
       left_insert_to_insert.set(leftSideJoiner.getInsertProb(rightSideJoiner))
@@ -248,40 +249,82 @@ case class SlothThetaJoinExec (
       right_update_to_update.set(rightSideJoiner.getUpdateProb(leftSideJoiner))
     }
 
-      val outputIter = CompletionIterator[InternalRow, Iterator[InternalRow]](
-            leftOutputIter, onLeftCompletion) ++
-        CompletionIterator[InternalRow, Iterator[InternalRow]](
-          rightOutputIter, onRightCompletion)
-
-      val outputProjection = thetaRunTime.outputProj
-      val outputIterWithMetrics = outputIter.map { row =>
-        numOutputRows += 1
-        if (row.isUpdate) updateRows += 2
-        else if (!row.isInsert) deleteRows += 1
-        val projectedRow = outputProjection(row)
-        projectedRow.setInsert(row.isInsert)
-        projectedRow.setUpdate(row.isUpdate)
-        projectedRow
-      }
-
-      // TODO: we do not consider removing old state now
-      def onAllCompletion: Unit = {
-        // Commit all state changes and update state store metrics
-        commitTimeMs += timeTakenMs {
-          val leftSideMetrics = leftSideJoiner.commitStateAndGetMetrics()
-          val rightSideMetrics = rightSideJoiner.commitStateAndGetMetrics()
-          val combinedMetrics = StateStoreMetrics.combine(Seq(leftSideMetrics, rightSideMetrics))
-          stateMemory += combinedMetrics.memoryUsedBytes
-        }
-
-        thetaRunTime.leftStateManager.purgeState()
-        thetaRunTime.rightStateManager.purgeState()
-        SlothRuntimeCache.put(opRtId, thetaRunTime)
-      }
-
+    val outputIter = CompletionIterator[InternalRow, Iterator[InternalRow]](
+          leftOutputIter, onLeftCompletion) ++
       CompletionIterator[InternalRow, Iterator[InternalRow]](
-        outputIterWithMetrics, onAllCompletion)
+        rightOutputIter, onRightCompletion)
+
+    val outputProjection = thetaRunTime.outputProj
+    val outputIterWithMetrics = outputIter.map { row =>
+      numOutputRows += 1
+      if (row.isUpdate) updateRows += 2
+      else if (!row.isInsert) deleteRows += 1
+      val projectedRow = outputProjection(row)
+      projectedRow.setInsert(row.isInsert)
+      projectedRow.setUpdate(row.isUpdate)
+      projectedRow
     }
+
+    // TODO: we do not consider removing old state now
+    def onAllCompletion: Unit = {
+      // Commit all state changes and update state store metrics
+      commitTimeMs += timeTakenMs {
+        val leftSideMetrics = leftSideJoiner.commitStateAndGetMetrics()
+        val rightSideMetrics = rightSideJoiner.commitStateAndGetMetrics()
+        val combinedMetrics = StateStoreMetrics.combine(Seq(leftSideMetrics, rightSideMetrics))
+        stateMemory += combinedMetrics.memoryUsedBytes
+      }
+
+      thetaRunTime.leftStateManager.purgeState()
+      thetaRunTime.rightStateManager.purgeState()
+      SlothRuntimeCache.put(opRtId, thetaRunTime)
+    }
+
+    CompletionIterator[InternalRow, Iterator[InternalRow]](
+      outputIterWithMetrics, onAllCompletion)
+  }
+
+  private var iOLAPFilter: (UnsafeRow => Boolean) = _
+  private var minValue: Double = _
+  private var maxValue: Double = _
+  val Q11_KEY = 1
+  val Q11_OP_ID = 0
+  val Q22_KEY = 1
+  val Q22_OP_ID = 1
+
+  private def getIOLAPFilter(): (UnsafeRow => Boolean) = {
+
+    if (enableIOLAP) {
+      query_name match {
+        case "q11" if Q11_OP_ID == stateInfo.get.operatorId =>
+          loadIOLAPDoubleTable(statRoot + "/iOLAP/q11_config.csv")
+          (row: UnsafeRow) => {
+            val key = row.getDouble(Q11_KEY)
+            if (key <= maxValue && key >= minValue) true
+            else false
+          }
+        case "q22" if Q22_OP_ID == stateInfo.get.operatorId =>
+          loadIOLAPDoubleTable(statRoot + "/iOLAP/q22_config.csv")
+          (row: UnsafeRow) => {
+            val key = row.getDouble(Q22_KEY)
+            if (key >= minValue) true
+            else false
+          }
+        case _ =>
+          (row: UnsafeRow) => {true}
+      }
+
+    } else {
+      (row: UnsafeRow) => {true}
+    }
+
+  }
+
+  private def loadIOLAPDoubleTable(path: String): Unit = {
+    val reader = new BufferedReader(new FileReader((path)))
+    minValue = reader.readLine().toDouble
+    maxValue = reader.readLine().toDouble
+    reader.close()
   }
 
   /**
@@ -468,16 +511,27 @@ case class SlothThetaJoinExec (
               updateOutput += 1
               row})
 
-        updatedStateRowsCount += 2
-        joinStateManager.remove(deleteKey, deleteRow)
-        joinStateManager.append(insertKey, insertRow)
+        if ((joinSide == LeftSide && iOLAPFilter(deleteRow) ||
+             joinSide == RightSide)) {
+          updatedStateRowsCount += 1
+          joinStateManager.remove(deleteKey, deleteRow)
+        }
+
+        if ((joinSide == LeftSide && iOLAPFilter(insertRow) ||
+             joinSide == RightSide)) {
+          updatedStateRowsCount += 1
+          joinStateManager.append(insertKey, insertRow)
+        }
 
       } else {
         outputIter = outputIter.filter(postJoinFilter)
 
-        updatedStateRowsCount += 1
-        if (isInsert) joinStateManager.append(key, thisRow)
-        else joinStateManager.remove(key, thisRow)
+        if ((joinSide == LeftSide && iOLAPFilter(thisRow) ||
+             joinSide == RightSide)) {
+          updatedStateRowsCount += 1
+          if (isInsert) joinStateManager.append(key, thisRow)
+          else joinStateManager.remove(key, thisRow)
+        }
       }
 
       outputIter
@@ -581,20 +635,29 @@ case class SlothThetaJoinExec (
     def numUpdatedStateRows: Long = updatedStateRowsCount
 
     def getInsertProb(otherSideJoiner: OneSideThetaJoiner): Long = {
-      if (insertOutput == 0) return 0
-      else return (insertOutput * SF)/(insertInput * otherSideJoiner.joinStateManager.getStateSize)
+      if (insertOutput == 0 || insertInput == 0 ||
+        otherSideJoiner.joinStateManager.getStateSize == 0) {
+        return 0
+      } else {
+        return (insertOutput * SF)/(insertInput * otherSideJoiner.joinStateManager.getStateSize)
+      }
     }
 
     def getDeleteProb(otherSideJoiner: OneSideThetaJoiner): Long = {
-      if (deleteOutput == 0) return 0
-      else return (deleteOutput * SF)/(deleteInput * otherSideJoiner.joinStateManager.getStateSize)
+      if (deleteOutput == 0 || deleteInput == 0 ||
+        otherSideJoiner.joinStateManager.getStateSize == 0) {
+        return 0
+      } else {
+        return (deleteOutput * SF)/(deleteInput * otherSideJoiner.joinStateManager.getStateSize)
+      }
     }
 
     def getUpdateProb(otherSideJoiner: OneSideThetaJoiner): Long = {
-      if (updateOutput == 0) return 0
-      else {
-        return (updateOutput * SF)/
-          (2L * updateInput * otherSideJoiner.joinStateManager.getStateSize)
+      if (updateOutput == 0 || updateInput == 0 ||
+        otherSideJoiner.joinStateManager.getStateSize == 0) {
+        return 0
+      } else {
+        return (updateOutput * SF)/(2 * updateInput * otherSideJoiner.joinStateManager.getStateSize)
       }
     }
 

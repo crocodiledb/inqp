@@ -389,8 +389,11 @@ case class SlothFilterExec(condition: Expression, child: SparkPlan)
           thisRow.cleanStates()
 
           if (isInsert && !updateCase) opInput(INSERT) += 1
-          else if (!isInsert && !isUpdate) opInput(DELETE) += 1
-          else if (!isInsert && isUpdate) opInput(UPDATE) += 1
+          else if (!isInsert && !isUpdate) {
+            opInput(DELETE) += 1
+          } else if (!isInsert && isUpdate) {
+            opInput(UPDATE) += 1
+          }
 
           if (predicate.eval(thisRow)) {
 

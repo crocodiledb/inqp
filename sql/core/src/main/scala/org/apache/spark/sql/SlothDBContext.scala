@@ -19,4 +19,11 @@ package org.apache.spark.sql
 
 object SlothDBContext {
   val enable_slothdb = true
+  var execution_mode = -1
+
+  val INCAWARE_PATH = 0
+  val INCAWARE_SUBPLAN = 1
+  val INCOBLIVIOUS = 2
+  val SLOTHINCSTAT = 3
+  val SLOTHTRAINING = 4
 }

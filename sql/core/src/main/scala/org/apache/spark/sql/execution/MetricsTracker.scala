@@ -34,6 +34,7 @@ case class SlothSummarizedMetrics() {
 
   var nodeType: Int = _
   var nodeName: String = _
+  var joinType: String = _
   var numPart: Int = _
   var children: Seq[SlothSummarizedMetrics] = _
   var numOfRows: Long = _
@@ -51,6 +52,15 @@ case class SlothSummarizedMetrics() {
   var delete_to_delete: Long = _
   var update_to_update: Long = _
   var numBatch: Long = _
+  var insert_batch: Long = _
+  var delete_batch: Long = _
+  var update_batch: Long = _
+  var left_insert_batch: Long = _
+  var left_delete_batch: Long = _
+  var left_update_batch: Long = _
+  var right_insert_batch: Long = _
+  var right_delete_batch: Long = _
+  var right_update_batch: Long = _
 
   var hasMetrics: Boolean = _
   val formatter = java.text.NumberFormat.getIntegerInstance
@@ -64,14 +74,31 @@ case class SlothSummarizedMetrics() {
 
     numGroups = metricsTracker.getNumGroups
     left_insert_to_insert += metricsTracker.getLeftInsertToInsert
+    if (metricsTracker.getLeftInsertToInsert != 0) left_insert_batch += 1
+
     left_delete_to_delete += metricsTracker.getLeftDeleteToDelete
+    if (metricsTracker.getLeftDeleteToDelete != 0) left_delete_batch += 1
+
     left_update_to_update += metricsTracker.getLeftUpdateToUpdate
+    if (metricsTracker.getLeftUpdateToUpdate != 0) left_update_batch += 1
+
     right_insert_to_insert += metricsTracker.getRightInsertToInsert
+    if (metricsTracker.getRightInsertToInsert != 0) right_insert_batch += 1
+
     right_delete_to_delete += metricsTracker.getRightDeleteToDelete
+    if (metricsTracker.getRightDeleteToDelete != 0) right_delete_batch += 1
+
     right_update_to_update += metricsTracker.getRightUpdateToUpdate
+    if (metricsTracker.getRightUpdateToUpdate != 0) right_update_batch += 1
+
     insert_to_insert += metricsTracker.getInsertToInsert
+    if (metricsTracker.getInsertToInsert != 0) insert_batch += 1
+
     delete_to_delete += metricsTracker.getDeleteToDelete
+    if (metricsTracker.getDeleteToDelete != 0) delete_batch += 1
+
     update_to_update += metricsTracker.getUpdateToUpdate
+    if (metricsTracker.getUpdateToUpdate != 0) update_batch += 1
   }
 
   def getFormattedMetrics(): String = {
@@ -83,31 +110,52 @@ case class SlothSummarizedMetrics() {
     baseString + updateString + deleteString + "\n"
   }
 
+  def getNumOfRows(): Long = {
+    numOfRows + updateRows/2
+  }
+
   def getCostModelInfo(): String = {
     val nodeName = findNameFromType(nodeType)
-    val totalNum = numBatch * numPart
     if (nodeType == SLOTHJOIN) {
+      var totalNum = scala.math.max(numPart * left_insert_batch, 1)
       val left_insert_prob = (left_insert_to_insert/totalNum).toDouble/SF.toDouble
+
+      totalNum = scala.math.max(numPart * left_delete_batch, 1)
       val left_delete_prob = (left_delete_to_delete/totalNum).toDouble/SF.toDouble
+
+      totalNum = scala.math.max(numPart * left_update_batch, 1)
       val left_update_prob = (left_update_to_update/totalNum).toDouble/SF.toDouble
+
+      totalNum = scala.math.max(numPart * right_insert_batch, 1)
       val right_insert_prob = (right_insert_to_insert/totalNum).toDouble/SF.toDouble
+
+      totalNum = scala.math.max(numPart * right_delete_batch, 1)
       val right_delete_prob = (right_delete_to_delete/totalNum).toDouble/SF.toDouble
+
+      totalNum = scala.math.max(numPart * right_update_batch, 1)
       val right_update_prob = (right_update_to_update/totalNum).toDouble/SF.toDouble
-      return f"$nodeName,$left_insert_prob,$left_delete_prob,$left_update_prob," +
-        f"$right_insert_prob,$right_delete_prob,$right_update_prob\n"
+
+      f"$nodeName,$joinType,$left_insert_prob,$left_delete_prob," +
+        f"$left_update_prob,$right_insert_prob,$right_delete_prob,$right_update_prob\n"
     } else if (nodeType == SLOTHAGGREGATE) {
-      return f"$nodeName,$numGroups\n"
+      f"$nodeName,$numGroups\n"
     } else if (nodeType == SLOTHSELECT) {
+      var totalNum = scala.math.max(numPart * insert_batch, 1)
       val insert_prob = (insert_to_insert/totalNum).toDouble/SF.toDouble
+
+      totalNum = scala.math.max(numPart * delete_batch, 1)
       val delete_prob = (delete_to_delete/totalNum).toDouble/SF.toDouble
+
+      totalNum = scala.math.max(numPart * update_batch, 1)
       val update_prob = (update_to_update/totalNum).toDouble/SF.toDouble
-      return f"$nodeName,$insert_prob,$delete_prob,$update_prob\n"
+
+      f"$nodeName,$insert_prob,$delete_prob,$update_prob\n"
     } else if (nodeType == SLOTHSCAN) {
-      return f"$nodeName,$numOfRows\n"
+      f"$nodeName,$numOfRows\n"
     } else if (nodeType == SLOTHDISTINCT) {
-      return f"$nodeName,$numGroups\n"
+      f"$nodeName,$numGroups\n"
     } else {
-      return f"$nodeName\n"
+      f"$nodeName\n"
     }
   }
 }

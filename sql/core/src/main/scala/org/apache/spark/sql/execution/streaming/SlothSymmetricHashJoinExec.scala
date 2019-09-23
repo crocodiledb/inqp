@@ -17,6 +17,10 @@
 
 package org.apache.spark.sql.execution.streaming
 
+import java.io.{BufferedReader, FileReader}
+
+import scala.collection.mutable
+
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SlothDBCostModel._
 import org.apache.spark.sql.catalyst.InternalRow
@@ -28,9 +32,11 @@ import org.apache.spark.sql.execution.{BinaryExecNode, SlothMetricsTracker, Slot
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper._
 import org.apache.spark.sql.execution.streaming.state._
-import org.apache.spark.sql.internal.SessionState
+import org.apache.spark.sql.internal.{SessionState, SQLConf}
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.util.{CompletionIterator, SerializableConfiguration}
+
+
 
 /**
  * Performs stream-stream join using symmetric hash join algorithm. It works as follows.
@@ -185,6 +191,13 @@ case class SlothSymmetricHashJoinExec(
     new SerializableConfiguration(SessionState.newHadoopConf(
       sparkContext.hadoopConfiguration, sqlContext.conf)))
 
+  private val enableIOLAP =
+    sqlContext.sparkSession.conf.get(SQLConf.SLOTHDB_IOLAP).getOrElse(false)
+  private val query_name =
+    sqlContext.sparkSession.conf.get(SQLConf.SLOTHDB_QUERYNAME).get
+  private val statRoot =
+    sqlContext.sparkSession.conf.get(SQLConf.SLOTHDB_STAT_DIR).get
+
   val nullLeft = new GenericInternalRow(left.output.map(_.withNullability(true)).length)
   val nullRight = new GenericInternalRow(right.output.map(_.withNullability(true)).length)
 
@@ -292,15 +305,21 @@ case class SlothSymmetricHashJoinExec(
       val rightRowGen = UnsafeProjection.create(
          right.output, right.output :+ AttributeReference("counter", IntegerType)())
 
+      loadIOLAPTable()
+
       hashRunTime = new SlothHashJoinRuntime(
         outputProj, postJoinFilter, leftKeyProj, leftDeleteKeyProj, leftRowGen, leftStateManager,
-        rightKeyProj, rightDeleteKeyProj, rightRowGen, rightStateManager)
+        rightKeyProj, rightDeleteKeyProj, rightRowGen, rightStateManager, keySet)
     } else {
       hashRunTime = opRunTime.asInstanceOf[SlothHashJoinRuntime]
+
+      keySet = hashRunTime.keySet
 
       hashRunTime.leftStateManager.reInit(stateInfo, storeConf, hadoopConfBcast.value.value)
       hashRunTime.rightStateManager.reInit(stateInfo, storeConf, hadoopConfBcast.value.value)
     }
+
+    iOLAPFilter = getIOLAPFilter()
 
     val leftSideJoiner = new OneSideHashJoiner(
       LeftSide, left.output, leftKeys, leftInputIter, condition.leftSideOnly,
@@ -416,6 +435,81 @@ case class SlothSymmetricHashJoinExec(
 
     CompletionIterator[InternalRow, Iterator[InternalRow]](
         outputIterWithMetrics, onAllCompletion)
+  }
+
+  private var iOLAPFilter: (UnsafeRow => Boolean) = _
+  private var keySet: mutable.HashSet[Long] = _
+  val Q17_KEY = 0
+  val Q17_OP_ID = 2
+  val Q18_KEY = 0
+  val Q18_OP_ID = 3
+  val Q20_KEY = 0
+  val Q20_OP_ID = 1
+
+  private def getIOLAPFilter(): (UnsafeRow => Boolean) = {
+
+    if (enableIOLAP) {
+      query_name match {
+        case "q17" if Q17_OP_ID == stateInfo.get.operatorId =>
+          (row: UnsafeRow) => {
+            val key = row.getLong(Q17_KEY)
+            if (!keySet.contains(key)) true
+            else false
+          }
+        case "q18" if Q18_OP_ID == stateInfo.get.operatorId =>
+          (row: UnsafeRow) => {
+            val key = row.getLong(Q18_KEY)
+            if (keySet.contains(key)) true
+            else false
+          }
+        case "q20" if Q20_OP_ID == stateInfo.get.operatorId =>
+          (row: UnsafeRow) => {
+            val key = row.getLong(Q20_KEY)
+            if (keySet.contains(key)) true
+            else false
+          }
+        case _ =>
+          (row: UnsafeRow) => {true}
+      }
+
+    } else {
+      (row: UnsafeRow) => {true}
+    }
+
+  }
+
+  private def loadIOLAPTable(): Unit = {
+
+    if (enableIOLAP) {
+      query_name match {
+        case "q17" if Q17_OP_ID == stateInfo.get.operatorId =>
+          loadIOLAPLongTable(statRoot + "/iOLAP/q17_config.csv")
+        case "q18" if Q18_OP_ID == stateInfo.get.operatorId =>
+          loadIOLAPLongTable(statRoot + "/iOLAP/q18_config.csv")
+        case "q20" if Q20_OP_ID == stateInfo.get.operatorId =>
+          loadIOLAPLongTable(statRoot + "/iOLAP/q20_config.csv")
+        case _ =>
+      }
+    }
+
+  }
+
+  private def loadIOLAPLongTable(path: String): Unit = {
+
+    val reader = new BufferedReader(new FileReader((path)))
+    val keySet = new mutable.HashSet[Long]()
+
+    var endOfLine = false
+    var line: String = ""
+    while(!endOfLine) {
+      line = reader.readLine()
+      if (line != null) keySet += line.toLong
+      else endOfLine = true
+    }
+
+    reader.close()
+
+    this.keySet = keySet
   }
 
   /**
@@ -753,6 +847,7 @@ case class SlothSymmetricHashJoinExec(
           outerIter = outerIter ++ insertGenNullIter(key)
 
           joinStateManager.append(key, thisRow)
+
         } else {
           val valueWithCounter = joinStateManager.get(key, thisRow)
           if (getCounter(valueWithCounter) == -1) {
@@ -798,7 +893,8 @@ case class SlothSymmetricHashJoinExec(
 
     private def insertAndUpdateCounter (otherSideJoiner: OneSideHashJoiner,
                                     insertKey: UnsafeRow, insertRow: UnsafeRow,
-                                    generateRow: (InternalRow, InternalRow) => JoinedRow  ):
+                                    generateRow: (InternalRow, InternalRow) => JoinedRow,
+                                    isUpdate: Boolean):
     Unit = {
       joinStateManager.append(insertKey, insertRow)
       val insertedRow = joinStateManager.getMostRecent(insertKey)
@@ -806,6 +902,8 @@ case class SlothSymmetricHashJoinExec(
         val joinedRow =
           generateRow(getRawValue(insertedRow), otherSideJoiner.getRawValue(valueWithCounter))
         if (postJoinFilter(joinedRow)) {
+          if (!isUpdate) insertOutput += 1
+          else updateOutput += 1
           incCounter(insertedRow)
           otherSideJoiner.incCounter(valueWithCounter)
         }
@@ -814,12 +912,16 @@ case class SlothSymmetricHashJoinExec(
 
     private def deleteAndUpdateCounter (otherSideJoiner: OneSideHashJoiner,
                                         deleteKey: UnsafeRow, deleteRow: UnsafeRow,
-                                        generateRow: (InternalRow, InternalRow) => JoinedRow):
+                                        generateRow: (InternalRow, InternalRow) => JoinedRow,
+                                        isUpdate: Boolean):
     Unit = {
       joinStateManager.remove(deleteKey, deleteRow)
       otherSideJoiner.joinStateManager.getAll(deleteKey).foreach(valueWithCounter => {
         val joinedRow = generateRow(deleteRow, otherSideJoiner.getRawValue(valueWithCounter))
-        if (postJoinFilter(joinedRow)) otherSideJoiner.decCounter(valueWithCounter)
+        if (postJoinFilter(joinedRow)) {
+          if (!isUpdate) deleteOutput += 1
+          otherSideJoiner.decCounter(valueWithCounter)
+        }
       })
     }
 
@@ -888,8 +990,8 @@ case class SlothSymmetricHashJoinExec(
             }
           }
 
-          deleteAndUpdateCounter(otherSideJoiner, deleteKey, deleteRow, leftGenerateRow)
-          insertAndUpdateCounter(otherSideJoiner, insertKey, insertRow, leftGenerateRow)
+          deleteAndUpdateCounter(otherSideJoiner, deleteKey, deleteRow, leftGenerateRow, true)
+          insertAndUpdateCounter(otherSideJoiner, insertKey, insertRow, leftGenerateRow, true)
 
         } else {
           if (isInsert) {
@@ -900,7 +1002,7 @@ case class SlothSymmetricHashJoinExec(
                 joinedRow
               }}
             }
-            insertAndUpdateCounter(otherSideJoiner, key, thisRow, leftGenerateRow)
+            insertAndUpdateCounter(otherSideJoiner, key, thisRow, leftGenerateRow, false)
           } else {
             if (hasMatch(otherSideJoiner, key, thisRow, leftGenerateRow)) {
               outputIter = Seq(thisRow).toIterator.map{row => {
@@ -909,7 +1011,7 @@ case class SlothSymmetricHashJoinExec(
                 joinedRow
               }}
             }
-            deleteAndUpdateCounter(otherSideJoiner, key, thisRow, leftGenerateRow)
+            deleteAndUpdateCounter(otherSideJoiner, key, thisRow, leftGenerateRow, false)
           }
         }
       } else {  // Right Side
@@ -940,8 +1042,8 @@ case class SlothSymmetricHashJoinExec(
               }}.filter(postJoinFilter)
             }
 
-            deleteAndUpdateCounter(otherSideJoiner, deleteKey, deleteRow, rightGenerateRow)
-            insertAndUpdateCounter(otherSideJoiner, insertKey, insertRow, rightGenerateRow)
+            deleteAndUpdateCounter(otherSideJoiner, deleteKey, deleteRow, rightGenerateRow, true)
+            insertAndUpdateCounter(otherSideJoiner, insertKey, insertRow, rightGenerateRow, true)
           } else {
             // TODO: We do not consider this case right now
             // throw new IllegalArgumentException("Semi join will not accept updates" +
@@ -960,7 +1062,7 @@ case class SlothSymmetricHashJoinExec(
               }).filter(postJoinFilter)
           }
 
-          insertAndUpdateCounter(otherSideJoiner, key, thisRow, rightGenerateRow)
+          insertAndUpdateCounter(otherSideJoiner, key, thisRow, rightGenerateRow, false)
         } else {
           if (isLastMatch(otherSideJoiner, key, thisRow, rightGenerateRow)) {
             outputIter = outputIter ++ otherSideJoiner.joinStateManager.getAll(key).
@@ -972,7 +1074,7 @@ case class SlothSymmetricHashJoinExec(
             }}.filter(postJoinFilter)
           }
 
-          deleteAndUpdateCounter(otherSideJoiner, key, thisRow, rightGenerateRow)
+          deleteAndUpdateCounter(otherSideJoiner, key, thisRow, rightGenerateRow, false)
         }
       }
 
@@ -1070,8 +1172,8 @@ case class SlothSymmetricHashJoinExec(
         }
 
         updatedStateRowsCount += 2
-        deleteAndUpdateCounter(otherSideJoiner, deleteKey, deleteRow, generateRow)
-        insertAndUpdateCounter(otherSideJoiner, insertKey, insertRow, generateRow)
+        deleteAndUpdateCounter(otherSideJoiner, deleteKey, deleteRow, generateRow, true)
+        insertAndUpdateCounter(otherSideJoiner, insertKey, insertRow, generateRow, true)
 
       } else {
         if (isInsert) {
@@ -1080,16 +1182,15 @@ case class SlothSymmetricHashJoinExec(
           }
           outerIter = outerIter ++ insertGenNullIter(key)
 
-          insertAndUpdateCounter(otherSideJoiner, key, thisRow, generateRow)
-        }
-        else {
+          insertAndUpdateCounter(otherSideJoiner, key, thisRow, generateRow, false)
+        } else {
           val valueWithCounter = joinStateManager.get(key, thisRow)
           if (getCounter(valueWithCounter) == -1) {
             outerIter = deleteNegateNullIter(thisRow)
           }
           outerIter = outerIter ++ genAntiJoinDeleteIter(otherSideJoiner, key, thisRow)
 
-          deleteAndUpdateCounter(otherSideJoiner, key, thisRow, generateRow)
+          deleteAndUpdateCounter(otherSideJoiner, key, thisRow, generateRow, false)
         }
 
         updatedStateRowsCount += 1
@@ -1152,7 +1253,9 @@ case class SlothSymmetricHashJoinExec(
         val isInsert = thisRow.isInsert
         val isUpdate = thisRow.isUpdate
 
-        if (preJoinFilter(thisRow)) {
+        if (preJoinFilter(thisRow) &&
+            ((joinSide == LeftSide && iOLAPFilter(thisRow)) ||
+            joinSide == RightSide)) {
           thisRow.cleanStates()
 
           // In update case
@@ -1262,18 +1365,28 @@ case class SlothSymmetricHashJoinExec(
     }
 
     def getInsertProb(otherSideJoiner: OneSideHashJoiner): Long = {
-      if (insertOutput == 0) return 0
-      else return (insertOutput * SF)/(insertInput * otherSideJoiner.joinStateManager.getStateSize)
+      if (insertOutput == 0 || insertInput == 0 ||
+        otherSideJoiner.joinStateManager.getStateSize == 0) {
+        return 0
+      } else {
+        return (insertOutput * SF)/(insertInput * otherSideJoiner.joinStateManager.getStateSize)
+      }
     }
 
     def getDeleteProb(otherSideJoiner: OneSideHashJoiner): Long = {
-      if (deleteOutput == 0) return 0
-      else return (deleteOutput * SF)/(deleteInput * otherSideJoiner.joinStateManager.getStateSize)
+      if (deleteOutput == 0 || deleteInput == 0 ||
+        otherSideJoiner.joinStateManager.getStateSize == 0) {
+        return 0
+      } else {
+        return (deleteOutput * SF)/(deleteInput * otherSideJoiner.joinStateManager.getStateSize)
+      }
     }
 
     def getUpdateProb(otherSideJoiner: OneSideHashJoiner): Long = {
-      if (updateOutput == 0) return 0
-      else {
+      if (updateOutput == 0 || updateInput == 0 ||
+        otherSideJoiner.joinStateManager.getStateSize == 0) {
+        return 0
+      } else {
         return (updateOutput * SF)/(2 * updateInput * otherSideJoiner.joinStateManager.getStateSize)
       }
     }
@@ -1291,4 +1404,5 @@ case class SlothHashJoinRuntime (
   rightKeyProj: UnsafeProjection,
   rightDeleteKeyProj: UnsafeProjection,
   rightRowGen: UnsafeProjection,
-  rightStateManager: SlothHashJoinStateManager) extends SlothRuntime {}
+  rightStateManager: SlothHashJoinStateManager,
+  keySet: mutable.HashSet[Long]) extends SlothRuntime {}

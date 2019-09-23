@@ -150,13 +150,41 @@ object SQLConf {
     }
   }
 
-  val SLOTHDB_ENABLE_INCREMENTABILITY = buildConf("spark.sql.slothdb.incrementability")
-    .doc("Whether we execute in an incrementability-away way")
-    .booleanConf
+  val SLOTHDB_EXECUTION_MODE = buildConf("spark.sql.slothdb.executionmode")
+    .doc("In which way we execute the query: " +
+      "0 -> incrementability-aware;" +
+      "1 -> incrementability-oblivious" +
+      "2 -> generate statistical information")
+    .intConf
+    .createOptional
+
+  val SLOTHDB_BATCH_NUM = buildConf("spark.sql.slothdb.batchnum")
+    .doc("batch number")
+    .intConf
+    .createOptional
+
+  val SLOTHDB_LATENCY_CONSTRAINT = buildConf("spark.sql.slothdb.latency.constraint")
+    .doc("Latency constraint")
+    .doubleConf
+    .createOptional
+
+  val SLOTHDB_RESOURCE_CONSTRAINT = buildConf("spark.sql.slothdb.resource.constraint")
+    .doc("Resource constraint")
+    .doubleConf
     .createOptional
 
   val SLOTHDB_STAT_DIR = buildConf("spark.sql.slothdb.stat.dir")
     .doc("A directory for statistics of SlothDB")
+    .stringConf
+    .createOptional
+
+  val SLOTHDB_IOLAP = buildConf("spark.sql.slothdb.iOLAP")
+    .doc("enable iOLAP or not")
+    .booleanConf
+    .createOptional
+
+  val SLOTHDB_QUERYNAME = buildConf("spark.sql.slothdb.queryname")
+    .doc("queryname")
     .stringConf
     .createOptional
 

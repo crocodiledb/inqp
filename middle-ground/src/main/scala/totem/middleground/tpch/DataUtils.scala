@@ -17,12 +17,16 @@
 
 package totem.middleground.tpch
 
+import java.io.{BufferedReader, FileReader}
 import java.util.concurrent.TimeUnit
+
+import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.avro.from_avro
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.Trigger
+
 
 object DataUtils {
 
@@ -55,16 +59,56 @@ object DataUtils {
       .load(staticPath)
   }
 
+  def loadIOLAPDoubleTable(spark: SparkSession, path: String): Double = {
+    val reader = new BufferedReader(new FileReader((path)))
+    val value = reader.readLine().toDouble
+    reader.close()
+
+    value
+  }
+
+  def loadIOLAPLongTable(spark: SparkSession, path: String): Array[Long] = {
+    val reader = new BufferedReader(new FileReader((path)))
+    val keyArray = new ArrayBuffer[Long]()
+
+    var endOfLine = false
+    var line: String = ""
+    while(!endOfLine) {
+      line = reader.readLine()
+      if (line != null) keyArray.append(line.toLong)
+      else endOfLine = true
+    }
+
+    reader.close()
+
+    keyArray.toArray
+  }
+
   def writeToSink(query_result: DataFrame, query_name: String): Unit = {
     val q = query_result
       .writeStream
       .outputMode("append")
       .format("console")
       .trigger(Trigger.ProcessingTime(100, TimeUnit.MILLISECONDS))
-       // .option("checkpointLocation", TPCHSchema.checkpointLocation + "/" + "query")
+      // .option("checkpointLocation", TPCHSchema.checkpointLocation + "/" + query_name)
       .queryName(query_name)
       .start()
 
     q.awaitTermination()
   }
+
+  def writeToFile(query_result: DataFrame, query_name: String, path: String): Unit = {
+    val q = query_result.coalesce(1)
+      .writeStream
+      .outputMode("append")
+      .format("csv")
+      .option("path", path)
+      .option("checkpointLocation", TPCHSchema.checkpointLocation + "/" + query_name)
+      .trigger(Trigger.ProcessingTime(100, TimeUnit.MILLISECONDS))
+      .queryName(query_name)
+      .start()
+
+    q.awaitTermination()
+  }
+
 }

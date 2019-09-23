@@ -87,6 +87,10 @@ private[kafka010] class KafkaMicroBatchReader(
     realEndOffsets.exists(pair => endPartitionOffsets.get(pair._1).get != pair._2)
   }
 
+  override def getFinalOffset: Offset = {
+    KafkaSourceOffset(kafkaOffsetReader.fetchLatestOffsets())
+  }
+
   override def setOffsetRange(start: ju.Optional[Offset], end: ju.Optional[Offset]): Unit = {
     // Make sure initialPartitionOffsets is initialized
     initialPartitionOffsets

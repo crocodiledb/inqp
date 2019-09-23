@@ -30,6 +30,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, 
 import org.apache.spark.sql.execution.{SlothFilterExec, SlothProjectExec, SQLExecution}
 import org.apache.spark.sql.execution.datasources.v2.{StreamingDataSourceV2Relation, WriteToDataSourceV2}
 import org.apache.spark.sql.execution.streaming.sources.MicroBatchWriter
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.v2.{DataSourceOptions, DataSourceV2, MicroBatchReadSupport, StreamWriteSupport}
 import org.apache.spark.sql.sources.v2.reader.streaming.{MicroBatchReader, Offset => OffsetV2}
 import org.apache.spark.sql.streaming.{OutputMode, ProcessingTime, Trigger}
@@ -50,6 +51,8 @@ class MicroBatchExecution(
   extends StreamExecution(
     sparkSession, name, checkpointRoot, analyzedPlan, sink,
     trigger, triggerClock, outputMode, deleteCheckpointOnStop) {
+
+  import SlothDBContext._
 
   @volatile protected var sources: Seq[BaseStreamingSource] = Seq.empty
 
@@ -164,6 +167,12 @@ class MicroBatchExecution(
     logInfo(s"Query $prettyIdString was stopped")
   }
 
+  private def getFinalOffsets(): Map[BaseStreamingSource, String] = {
+    uniqueSources.map(source => {
+      (source, source.asInstanceOf[MicroBatchReader].getFinalOffset.json())
+    }).toMap
+  }
+
   /**
    * Repeatedly attempts to run batches as data arrives.
    */
@@ -172,7 +181,40 @@ class MicroBatchExecution(
     val noDataBatchesEnabled =
       sparkSessionForStream.sessionState.conf.streamingNoDataMicroBatchesEnabled
 
-    // slothCostModel.initialize(logicalPlan, name, slothdbStatDir)
+    if (enable_slothdb) {
+      execution_mode = sparkSession.conf.get(SQLConf.SLOTHDB_EXECUTION_MODE).getOrElse(-1)
+
+      if (execution_mode != SLOTHTRAINING) {
+        val incAware =
+          if (execution_mode == INCAWARE_SUBPLAN || execution_mode == INCAWARE_PATH) true
+          else false
+
+        val mpDecompose =
+          if (execution_mode == INCAWARE_PATH) true
+          else false
+
+        slothCostModel.initialize(logicalPlan,
+          name,
+          slothdbStatDir,
+          sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key).toInt,
+          mpDecompose,
+          incAware)
+
+        if (execution_mode != SLOTHINCSTAT) {
+          slothCostModel.loadEndOffsets(getFinalOffsets())
+          if (sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).isDefined) {
+            val latency_constraint =
+              sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).get
+            slothCostModel.genTriggerPlanForLatencyConstraint(latency_constraint)
+          } else {
+            val resource_constraint =
+              sparkSession.conf.get(SQLConf.SLOTHDB_RESOURCE_CONSTRAINT).get
+            slothCostModel.genTriggerPlanForResourceConstraint(resource_constraint)
+          }
+        }
+      }
+
+    }
 
     triggerExecutor.execute(() => {
       if (isActive) {
@@ -232,7 +274,7 @@ class MicroBatchExecution(
         } else Thread.sleep(pollingDelayMs)
 
         if (!currentBatchHasNewData && SlothDBContext.enable_slothdb) {
-          slothDBWriteStats()
+          slothDBWriteStats(slothCostModel)
           stop()
         }
       }
@@ -359,6 +401,16 @@ class MicroBatchExecution(
   private def constructNextBatch(noDataBatchesEnabled: Boolean): Boolean = withProgressLocked {
     if (isCurrentBatchConstructed) return true
 
+    // SlothDB: construct the next batch
+    val nextBatch =
+      if (execution_mode == INCAWARE_SUBPLAN ||
+        execution_mode == INCAWARE_PATH ||
+        execution_mode == INCOBLIVIOUS) {
+        slothCostModel.constructNewData()
+      } else {
+        null
+      }
+
     // Generate a map from each unique source to the next available offset.
     val latestOffsets: Map[BaseStreamingSource, Option[Offset]] = uniqueSources.map {
       case s: Source =>
@@ -372,9 +424,19 @@ class MicroBatchExecution(
           // Once v1 streaming source execution is gone, we can refactor this away.
           // For now, we set the range here to get the source to infer the available end offset,
           // get that offset, and then set the range again when we later execute.
-          s.setOffsetRange(
-            toJava(availableOffsets.get(s).map(off => s.deserializeOffset(off.json))),
-            Optional.empty())
+          if ((execution_mode == INCAWARE_SUBPLAN ||
+            execution_mode == INCAWARE_PATH ||
+            execution_mode == INCOBLIVIOUS) &&
+            nextBatch != null) {
+            val endOffset = toJava(nextBatch.get(s).map(off => s.deserializeOffset(off)))
+            s.setOffsetRange(
+              toJava(availableOffsets.get(s).map(off => s.deserializeOffset(off.json))),
+              endOffset)
+          } else {
+            s.setOffsetRange(
+              toJava(availableOffsets.get(s).map(off => s.deserializeOffset(off.json))),
+              Optional.empty())
+          }
         }
 
         val currentOffset = reportTimeTaken("getEndOffset") { s.getEndOffset() }
@@ -483,6 +545,7 @@ class MicroBatchExecution(
             toJava(current),
             Optional.of(availableV2))
           logDebug(s"Retrieving data from $reader: $current -> $availableV2")
+          // printf(s"Retrieving data from $reader: $current -> $availableV2\n")
 
           val (source, options) = reader match {
             // `MemoryStream` is special. It's for test only and doesn't have a `DataSourceV2`
@@ -555,7 +618,16 @@ class MicroBatchExecution(
         offsetSeqMetadata)
       lastExecution.executedPlan // Force the lazy generation of execution plan
       // SlothDB: some SlothDB optimizations
-      if (SlothDBContext.enable_slothdb) lastExecution.slothdbOptimization(runId, this)
+      if (SlothDBContext.enable_slothdb) {
+        lastExecution.slothdbOptimization(runId, this)
+        if (execution_mode == INCAWARE_SUBPLAN ||
+            execution_mode == INCAWARE_PATH ||
+            execution_mode == INCOBLIVIOUS) {
+          slothCostModel.triggerBlockingExecution(lastExecution.executedPlan)
+        } else {
+          lastExecution.setRepairMode(lastExecution.executedPlan, true)
+        }
+      }
     }
 
     val nextBatch =

@@ -30,6 +30,12 @@ object TPCHSchema {
   val nationTopics = "Nation"
   val regionTopics = "Region"
 
+  val largeSupplierTopics = "Supplier-Large"
+  val largePartTopics = "Part-Large"
+  val largePartSuppTopics = "PartSupp-Large"
+  val largeCustomerTopics = "Customer-Large"
+  val largeOrdersTopics = "Orders-Large"
+
   var checkpointLocation = "hdfs://localhost:9000/tpch_checkpoint"
   var staticTableLocation = "hdfs://localhost:9000/tpch_static"
 
@@ -112,11 +118,21 @@ object TPCHSchema {
   val avroRegionSchema = SchemaConverters.toAvroType(regionSchema)
 
   var datadir = "/home/totemtang/slothdb/slothdb_testsuite/datadir/tpchdata"
-  private def supplierPath = datadir + "/supplier"
-  private def partPath = datadir + "/part"
-  private def partsuppPath = datadir + "/partsupp"
-  private def customerPath = datadir + "/customer"
-  private def ordersPath = datadir + "/orders"
+  private def supplierPath =
+    if (!largeDataset) datadir + "/supplier"
+    else datadir + "/supplier_large"
+  private def partPath =
+    if (!largeDataset) datadir + "/part"
+    else datadir + "/part_large"
+  private def partsuppPath =
+    if (!largeDataset) datadir + "/partsupp"
+    else datadir + "/partsupp_large"
+  private def customerPath =
+    if (!largeDataset) datadir + "/customer"
+    else datadir + "/customer_large"
+  private def ordersPath =
+    if (!largeDataset) datadir + "/orders"
+    else datadir + "/orders_large"
   private def lineitemPath = datadir + "/lineitem"
   private def nationPath = datadir  + "/nation"
   private def regionPath = datadir + "/region"
@@ -131,6 +147,7 @@ object TPCHSchema {
   var numMiniBatch = 4
   var scaleFactor = 1.0
   var partitions = 1
+  var largeDataset = false
 
   def lineitemSize: Int =
     if (scaleFactor == 10) 59986052
@@ -159,23 +176,38 @@ object TPCHSchema {
   def regionOffset: Int = 5
 
   def GetMetaData(tableName: String):
-  Option[Tuple6[StructType, String, String, String, String, Long]] =
+  Option[(StructType, String, String, String, String, Long)] =
   {
     tableName.toLowerCase match {
       case "part" =>
-        Some((partSchema, avroPartSchema.toString, partPath, Empty_Static, partTopics, partOffset))
+        val realTopics =
+          if (largeDataset) largePartTopics
+          else partTopics
+        Some((partSchema, avroPartSchema.toString, partPath, Empty_Static, realTopics, partOffset))
       case "partsupp" =>
+        val realTopics =
+          if (largeDataset) largePartSuppTopics
+          else partsuppTopics
         Some((partsuppSchema, avroPartSuppSchema.toString,
-          partsuppPath, Empty_Static, partsuppTopics, partsuppOffset))
+          partsuppPath, Empty_Static, realTopics, partsuppOffset))
       case "supplier" =>
+        val realTopics =
+          if (largeDataset) largeSupplierTopics
+          else supplierTopics
         Some((supplierSchema, avroSupplierSchema.toString,
-          supplierPath, Empty_Static, supplierTopics, supplierOffset))
+          supplierPath, Empty_Static, realTopics, supplierOffset))
       case "customer" =>
+        val realTopics =
+          if (largeDataset) largeCustomerTopics
+          else customerTopics
         Some((customerSchema, avroCustomerSchema.toString,
-          customerPath, Empty_Static, customerTopics, customerOffset))
+          customerPath, Empty_Static, realTopics, customerOffset))
       case "orders" =>
+        val realTopics =
+          if (largeDataset) largeOrdersTopics
+          else ordersTopics
         Some((ordersSchema, avroOrdersSchema.toString,
-          ordersPath, Empty_Static, ordersTopics, ordersOffset))
+          ordersPath, Empty_Static, realTopics, ordersOffset))
       case "lineitem" =>
         Some((lineitemSchema, avroLineitemSchema.toString,
           lineitemPath, Empty_Static, lineitemTopics, lineitemOffset))
@@ -191,12 +223,16 @@ object TPCHSchema {
     }
   }
 
-  def setQueryMetaData(numBatch: Int, SF: Double, hdfsRoot: String, inputPartition: Int): Unit = {
+  def setQueryMetaData(numBatch: Int, SF: Double, hdfsRoot: String,
+                       inputPartition: Int, largeDataset: Boolean): Unit = {
     numMiniBatch = numBatch
     scaleFactor = SF
     checkpointLocation = hdfsRoot + "/tpch_checkpoint"
     staticTableLocation = hdfsRoot + "/tpch_static"
     partitions = inputPartition
+    this.largeDataset = largeDataset
+    this.hdfsRoot = hdfsRoot
   }
 
+  var hdfsRoot: String = _
 }
