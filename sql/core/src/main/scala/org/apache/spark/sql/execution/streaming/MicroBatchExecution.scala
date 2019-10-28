@@ -193,19 +193,24 @@ class MicroBatchExecution(
           if (execution_mode == INCAWARE_PATH) true
           else false
 
+        val costBias = sparkSession.conf.get(SQLConf.SLOTHDB_COST_MODEL_BIAS).getOrElse(1.0)
+
         slothCostModel.initialize(logicalPlan,
           name,
           slothdbStatDir,
           sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key).toInt,
           mpDecompose,
-          incAware)
+          incAware,
+          costBias)
 
         if (execution_mode != SLOTHINCSTAT) {
           slothCostModel.loadEndOffsets(getFinalOffsets())
           if (sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).isDefined) {
             val latency_constraint =
               sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).get
-            slothCostModel.genTriggerPlanForLatencyConstraint(latency_constraint)
+            val inc_percentage =
+              sparkSession.conf.get(SQLConf.SLOTHDB_INC_PERCENTAGE).getOrElse(1.0)
+            slothCostModel.genTriggerPlanForLatencyConstraint(latency_constraint, inc_percentage)
           } else {
             val resource_constraint =
               sparkSession.conf.get(SQLConf.SLOTHDB_RESOURCE_CONSTRAINT).get
@@ -260,7 +265,11 @@ class MicroBatchExecution(
           }
         }
 
-        finishTrigger(currentBatchHasNewData)  // Must be outside reportTimeTaken so it is recorded
+        // Must be outside reportTimeTaken so it is recorded
+        val currentStep =
+          if (slothCostModel != null) slothCostModel.currentStep
+          else 0
+        finishTrigger(currentBatchHasNewData, slothCostModel.currentStep)
 
         // Signal waiting threads. Note this must be after finishTrigger() to ensure all
         // activities (progress generation, etc.) have completed before signaling.

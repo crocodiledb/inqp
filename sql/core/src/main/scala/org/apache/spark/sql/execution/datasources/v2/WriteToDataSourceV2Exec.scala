@@ -17,6 +17,9 @@
 
 package org.apache.spark.sql.execution.datasources.v2
 
+import com.sun.management.OperatingSystemMXBean
+import java.lang.management.ManagementFactory
+import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
 import org.apache.spark.{SparkEnv, SparkException, TaskContext}
@@ -34,6 +37,7 @@ import org.apache.spark.sql.sources.v2.writer._
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.Utils
 
+
 /**
  * Deprecated logical plan for writing data into data source v2. This is being replaced by more
  * specific logical plans, like [[org.apache.spark.sql.catalyst.plans.logical.AppendData]].
@@ -50,6 +54,7 @@ case class WriteToDataSourceV2(writer: DataSourceWriter, query: LogicalPlan) ext
 case class WriteToDataSourceV2Exec(writer: DataSourceWriter, query: SparkPlan) extends SparkPlan {
   private var processTimeMs: Long = 0L
   private var startUpTimeMs: Long = 0L
+  var cpuLoad: ArrayBuffer[Double] = new ArrayBuffer()
 
   override def children: Seq[SparkPlan] = Seq(query)
   override def output: Seq[Attribute] = Nil
@@ -75,6 +80,22 @@ case class WriteToDataSourceV2Exec(writer: DataSourceWriter, query: SparkPlan) e
     logInfo(s"Start processing data source writer: $writer. " +
       s"The input RDD has ${messages.length} partitions.")
 
+    val osBean = ManagementFactory.getPlatformMXBean(
+      classOf[OperatingSystemMXBean])
+
+    val cpuThread = new Thread{
+      override def run: Unit = {
+        try {
+          while (true) {
+            Thread.sleep(100)
+            cpuLoad.append(osBean.getSystemCpuLoad)
+          }
+        } catch {
+          case _: Throwable =>
+        }
+    }}
+
+    cpuThread.start()
     val start = System.nanoTime()
     try {
       sparkContext.runJob(
@@ -88,6 +109,7 @@ case class WriteToDataSourceV2Exec(writer: DataSourceWriter, query: SparkPlan) e
         }
       )
       val end = System.nanoTime()
+      cpuThread.interrupt()
       processTimeMs = (end - start)/1000000
       print(s"execute RDD ${processTimeMs} ms\n")
 

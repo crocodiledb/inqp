@@ -32,7 +32,7 @@ class LoadTPCH (bootstrap: String, data_root_dir: String,
 
   def loadOneTable(tableName: String, schema: StructType, path: String, topics: String): Unit =
   {
-    printf(s"Loading into ${topics} with path ${path}")
+    printf(s"Loading into ${topics} with path ${path}\n")
     val spark = SparkSession.builder()
       .appName("Loading " + tableName)
       .getOrCreate()
@@ -89,8 +89,9 @@ object LoadTPCH {
         List("Part", "PartSupp", "Supplier", "Customer",
           "Orders", "Lineitem", "Nation", "Region")
       } else {
-         List("Part_large", "PartSupp_large", "Supplier_large",
-           "Customer_large", "Orders_large")
+         // List("Part_large", "PartSupp_large", "Supplier_large",
+         //  "Customer_large", "Orders_large")
+         List("PartSupp_large")
       }
     val loadThreads = loadTables.map(new WritingThread(loader, _))
 

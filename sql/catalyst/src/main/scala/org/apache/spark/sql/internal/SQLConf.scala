@@ -158,6 +158,11 @@ object SQLConf {
     .intConf
     .createOptional
 
+  val SLOTHDB_TOTAL_TIME = buildConf("spark.sql.slothdb.totaltime")
+    .doc("total time")
+    .doubleConf
+    .createOptional
+
   val SLOTHDB_BATCH_NUM = buildConf("spark.sql.slothdb.batchnum")
     .doc("batch number")
     .intConf
@@ -170,6 +175,16 @@ object SQLConf {
 
   val SLOTHDB_RESOURCE_CONSTRAINT = buildConf("spark.sql.slothdb.resource.constraint")
     .doc("Resource constraint")
+    .doubleConf
+    .createOptional
+
+  val SLOTHDB_INC_PERCENTAGE = buildConf("spark.sql.slothdb.inc.percentage")
+    .doc("Percentage of choosing right orders of incrementability")
+    .doubleConf
+    .createOptional
+
+  val SLOTHDB_COST_MODEL_BIAS = buildConf("spark.sql.slothdb.inc.bias")
+    .doc("cost model bias")
     .doubleConf
     .createOptional
 

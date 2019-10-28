@@ -17,10 +17,12 @@
 
 package org.apache.spark.sql
 
+import scala.collection.mutable.ArrayBuffer
 import scala.math._
 
 import org.apache.spark.sql.catalyst.plans.{FullOuter, LeftAnti, LeftOuter, RightOuter}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+
 
 abstract class OperatorCostModel {
 
@@ -144,6 +146,25 @@ abstract class OperatorCostModel {
     }
   }
 
+  protected def collectTotalRows(): Double = {
+    if (!this.hasNewData()) return 0.0
+
+    var totalRows = this.opResource
+    if (nodeType == SLOTHSELECT) {
+      this.children(0).children.foreach(child => {
+        val childTotal = child.collectTotalRows()
+        totalRows += childTotal
+      })
+    } else {
+      children.foreach(child => {
+        val childTotal = child.collectTotalRows()
+        totalRows += childTotal
+      })
+    }
+
+    totalRows
+  }
+
   protected def collectLatencyAndResource(subPlanAware: Boolean):
   (Double, Double) = {
     if (!this.hasNewData()) return (0.0, 0.0)
@@ -205,6 +226,41 @@ abstract class OperatorCostModel {
     val pair = this.collectLatencyAndResource(subPlanAware)
     (pair._1 * numPart, pair._2 * numPart)
   }
+
+  def getCardinalityArray(batchNum: Int): Array[Double] = {
+    val subPlanAware = false
+    val cardinalityOnly = true
+
+    val cardArray = new ArrayBuffer[Double]()
+
+    this.reset(cardinalityOnly)
+    this.preProcess()
+    val batchNums = Array.fill(1)(batchNum)
+    val executable = Array.fill(1)(true)
+    for (i <- 0 until batchNum) {
+      val isLastBatch = (i + 1 == batchNum)
+      this.getNextBatch(batchNums, isLastBatch, executable)
+
+      val realCard = this.collectTotalRows() * numPart
+      cardArray.append(realCard)
+    }
+
+    cardArray.toArray
+  }
+
+  // private def additionalCardForPostgres(): Double = {
+  //   var additionalCard =
+  //     if (this.nodeType == SLOTHSELECT) {
+  //       val child = this.children(0)
+  //       child.outputRows
+  //     } else 0.0
+
+  //   children.foreach(c => {
+  //     additionalCard += c.additionalCardForPostgres()
+  //   })
+
+  //   additionalCard
+  // }
 
   private def findNextStep(batchNums: Array[Int],
                            batchSteps: Array[Int],
@@ -291,7 +347,8 @@ abstract class OperatorCostModel {
                  logicalPlan: LogicalPlan,
                  children: Array[OperatorCostModel],
                  numPart: Int,
-                 configs: Array[String]): Unit
+                 configs: Array[String],
+                 costBias: Double): Unit
   def copy(): OperatorCostModel
   def reset(cardinalityOnly: Boolean): Unit
   def getNextBatch(batchNum: Array[Int], isLateBatch: Boolean, executable: Array[Boolean]):
@@ -322,19 +379,21 @@ class JoinCostModel extends OperatorCostModel {
                           logicalPlan: LogicalPlan,
                           children: Array[OperatorCostModel],
                           numPart: Int,
-                 configs: Array[String]): Unit = {
+                          configs: Array[String],
+                          costBias: Double): Unit = {
     initHelper(id, logicalPlan, children, numPart)
     joinType = configs(1)
-    left_insert_to_insert = configs(2).toDouble
-    left_delete_to_delete = configs(3).toDouble
-    left_update_to_update = configs(4).toDouble
-    right_insert_to_insert = configs(5).toDouble
-    right_delete_to_delete = configs(6).toDouble
-    right_update_to_update = configs(7).toDouble
+    left_insert_to_insert = configs(2).toDouble * costBias
+    left_delete_to_delete = configs(3).toDouble * costBias
+    left_update_to_update = configs(4).toDouble * costBias
+    right_insert_to_insert = configs(5).toDouble * costBias
+    right_delete_to_delete = configs(6).toDouble * costBias
+    right_update_to_update = configs(7).toDouble * costBias
   }
 
   override def copy(): OperatorCostModel = {
     val newOP = new JoinCostModel
+    newOP.joinType = joinType
     newOP.left_insert_to_insert = left_insert_to_insert
     newOP.left_delete_to_delete = left_delete_to_delete
     newOP.left_update_to_update = left_update_to_update
@@ -481,7 +540,8 @@ class ScanCostModel extends OperatorCostModel {
                           logicalPlan: LogicalPlan,
                           children: Array[OperatorCostModel],
                           numPart: Int,
-                 configs: Array[String]): Unit = {
+                          configs: Array[String],
+                          costBias: Double): Unit = {
     initHelper(id, logicalPlan, children, numPart)
     inputRows = configs(1).toDouble
     isStatic = (inputRows < MIN_STREAMING_SIZE)
@@ -537,10 +597,11 @@ class AggregateCostModel extends OperatorCostModel {
   override def initialize(id: Int,
                           logicalPlan: LogicalPlan,
                           chidren: Array[OperatorCostModel],
-                           numPart: Int,
-                 configs: Array[String]): Unit = {
+                          numPart: Int,
+                          configs: Array[String],
+                          costBias: Double): Unit = {
     initHelper(id, logicalPlan, chidren, numPart)
-    numGroups = configs(1).toDouble
+    numGroups = configs(1).toDouble * costBias
     this.realNumPart = scala.math.min(numGroups, numPart.toDouble)
   }
 
@@ -596,8 +657,9 @@ class SortCostModel extends OperatorCostModel {
   override def initialize(id: Int,
                           logicalPlan: LogicalPlan,
                           children: Array[OperatorCostModel],
-                           numPart: Int,
-                 configs: Array[String]): Unit = {
+                          numPart: Int,
+                          configs: Array[String],
+                          costBias: Double): Unit = {
     initHelper(id, logicalPlan, children, numPart)
   }
 
@@ -640,12 +702,13 @@ class SelectCostModel extends OperatorCostModel {
   override def initialize(id: Int,
                           logicalPlan: LogicalPlan,
                           children: Array[OperatorCostModel],
-                           numPart: Int,
-                 configs: Array[String]): Unit = {
+                          numPart: Int,
+                          configs: Array[String],
+                          costBias: Double): Unit = {
     initHelper(id, logicalPlan, children, numPart)
-    insert_to_insert = configs(1).toDouble
-    delete_to_delete = configs(2).toDouble
-    update_to_update = configs(3).toDouble
+    insert_to_insert = configs(1).toDouble * costBias
+    delete_to_delete = configs(2).toDouble * costBias
+    update_to_update = configs(3).toDouble * costBias
   }
 
   override def copy(): OperatorCostModel = {
@@ -692,10 +755,11 @@ class DistinctCostModel extends OperatorCostModel {
   override def initialize(id: Int,
                           logicalPlan: LogicalPlan,
                           children: Array[OperatorCostModel],
-                           numPart: Int,
-                 configs: Array[String]): Unit = {
+                          numPart: Int,
+                          configs: Array[String],
+                          costBias: Double): Unit = {
     initHelper(id, logicalPlan, children, numPart)
-    numGroups = configs(1).toDouble
+    numGroups = configs(1).toDouble * costBias
   }
 
   override def copy(): OperatorCostModel = {
