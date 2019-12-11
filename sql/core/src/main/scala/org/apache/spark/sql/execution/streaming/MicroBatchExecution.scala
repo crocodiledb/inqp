@@ -214,7 +214,9 @@ class MicroBatchExecution(
           } else {
             val resource_constraint =
               sparkSession.conf.get(SQLConf.SLOTHDB_RESOURCE_CONSTRAINT).get
-            slothCostModel.genTriggerPlanForResourceConstraint(resource_constraint)
+            val inc_percentage =
+              sparkSession.conf.get(SQLConf.SLOTHDB_INC_PERCENTAGE).getOrElse(1.0)
+            slothCostModel.genTriggerPlanForResourceConstraint(resource_constraint, inc_percentage)
           }
         }
       }

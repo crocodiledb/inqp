@@ -40,8 +40,8 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
   val iOLAP_Q20_dst = "/iOLAP/q20_config.dst"
   val iOLAP_Q22_dst = "/iOLAP/q22_config.dst"
 
-  val iOLAP_ON = 0
-  val iOLAP_OFF = 1
+  val iOLAP_OFF = 0
+  val iOLAP_ON = 1
   val iOLAP_TRAINING = 2
 
   DataUtils.bootstrap = bootstrap
@@ -925,7 +925,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val p = DataUtils.loadStreamTable(spark, "part", "p")
     val ps = DataUtils.loadStreamTable(spark, "partsupp", "ps")
     val l = DataUtils.loadStreamTable(spark, "lineitem", "l")
-    val o = DataUtils.loadStreamTable(spark, "orders", "o
+    val o = DataUtils.loadStreamTable(spark, "orders", "o")
     val result = p
         .join(ps, $"p_partkey" === $"ps_partkey", "left_anti")
         .join(l, $"p_partkey" === $"l_partkey")
@@ -964,7 +964,6 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
     val o = DataUtils.loadStreamTable(spark, "orders", "o")
 
     val result = o
-      uter
       .groupBy($"o_custkey")
       .agg(
         c_count($"o_orderkey").as("c_count"))

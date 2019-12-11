@@ -380,13 +380,18 @@ class SlothDBCostModel extends Logging {
     }
   }
 
-  def genTriggerPlanForResourceConstraint(resourceConstraint: Double): Unit = {
+  def genTriggerPlanForResourceConstraint(resourceConstraint: Double, threshold: Double)
+  : Unit = {
     val realConstraint = resourceConstraint * BATCH_RESOURCE
 
-    if (incAware) {
+    if (incAware && mpDecompose) {
+      genMPPlanForResourceConstraint(resourceConstraint, threshold)
+    } else if (incAware) {
       val tmpBatchNums = Array.fill[Int](subPlans.length)(MIN_BATCHNUM)
       var curResource = computeResourceForSubPlans(subPlans, tmpBatchNums, true, cardinalityOnly)
       var preIndex: Int = -1
+
+      val random = scala.util.Random
 
       while (curResource <= realConstraint) {
 
@@ -401,8 +406,13 @@ class SlothDBCostModel extends Logging {
             (incability, index)
           }).reduceLeft(
           (pairA, pairB) => {
-            if (pairA._1 > pairB._1) pairA
-            else pairB
+            if (random.nextFloat < threshold) { // correct case
+              if (pairA._1 > pairB._1) pairA
+              else pairB
+            } else {
+              if (pairA._1 > pairB._1) pairB
+              else pairA
+            }
           })
 
         preIndex = pair._2
@@ -413,6 +423,11 @@ class SlothDBCostModel extends Logging {
 
       if (preIndex != -1) tmpBatchNums(preIndex) -= 1
       batchNums = tmpBatchNums
+
+      batchNums.zipWithIndex.foreach(batchNumWithIndex => {
+        printf(s"${batchNumWithIndex._2}: ${batchNumWithIndex._1}\n")
+      })
+
     } else {
       var tmpTotalBatchNum = MIN_BATCHNUM
       var curResource = computeLatencyAndResource(tmpTotalBatchNum,
@@ -425,6 +440,7 @@ class SlothDBCostModel extends Logging {
       }
 
       totalBatchNum = scala.math.max(tmpTotalBatchNum - 1, MIN_BATCHNUM)
+      printf(s"TotalBatchNum: ${totalBatchNum}\n")
     }
 
   }
@@ -450,6 +466,52 @@ class SlothDBCostModel extends Logging {
       return !subPlan.getChildDep.exists(tmpIndex => {
         tmpBatchNums(tmpIndex) >= tmpBatchNums(index)})
     }
+  }
+
+
+  def genMPPlanForResourceConstraint(resourceConstraint: Double, threshold: Double)
+  : Unit = {
+    val realConstraint = resourceConstraint * BATCH_RESOURCE
+
+    var curResource = computeResourceForMPs(subPlans, true, cardinalityOnly)
+    var preIndex: Int = -1
+
+    val random = scala.util.Random
+
+    while (curResource > realConstraint) {
+
+      val pair = subPlans.filter(_.hasNewData())
+        .map(findParentBatchNum(_))
+        .map(subPlan => {
+
+          val incability = subPlan.computeMPIncrementabilityForLatencyConstraint()
+
+          (incability, subPlan.index)
+        }).filter(pair => {
+        pair._1 != MAX_INCREMENTABILITY
+      }).reduceLeft(
+        (pairA, pairB) => {
+          if (random.nextFloat < threshold) {
+            if (pairA._1 < pairB._1) pairA
+            else pairB
+          } else {
+            if (pairA._1 < pairB._1) pairB
+            else pairA
+          }
+        })
+
+      preIndex = pair._2
+      subPlans(preIndex).decreaseMPBatchNum()
+
+      curResource = computeResourceForMPs(subPlans, true, cardinalityOnly)
+    }
+
+    // if (preIndex != -1) subPlans(preIndex).increaseMPBatchNum()
+
+    subPlans.foreach(subPlan => {
+      subPlan.mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
+        printf(s"${batchNumWithIndex._2}: ${batchNumWithIndex._1}\n")
+      })})
   }
 
 
@@ -490,10 +552,10 @@ class SlothDBCostModel extends Logging {
       curLatency = computeLatencyForMPs(subPlans, true, cardinalityOnly)
     }
 
-      if (preIndex != -1) subPlans(preIndex) .increaseMPBatchNum()
+    if (preIndex != -1) subPlans(preIndex).increaseMPBatchNum()
 
-      subPlans.foreach(subPlan => {
-        subPlan.mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
+    subPlans.foreach(subPlan => {
+      subPlan.mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
         printf(s"${batchNumWithIndex._2}: ${batchNumWithIndex._1}\n")
       })})
   }
