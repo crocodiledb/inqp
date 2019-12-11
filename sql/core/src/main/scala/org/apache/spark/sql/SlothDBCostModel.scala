@@ -526,18 +526,20 @@ class SlothDBCostModel extends Logging {
 
     while (curLatency <= realConstraint) {
 
+      val smallInc = (random.nextFloat() < threshold)
+
       val pair = subPlans.filter(_.hasNewData())
         .map(findParentBatchNum(_))
         .map(subPlan => {
 
-          val incability = subPlan.computeMPIncrementabilityForLatencyConstraint()
+          val incability = subPlan.computeMPIncrementabilityForLatencyConstraint(smallInc)
 
           (incability, subPlan.index)
         }).filter(pair => {
         pair._1 != MAX_INCREMENTABILITY
       }).reduceLeft(
         (pairA, pairB) => {
-          if (random.nextFloat < threshold) {
+          if (smallInc) {
             if (pairA._1 < pairB._1) pairA
             else pairB
           } else {
@@ -1013,8 +1015,12 @@ class SlothSubPlan {
     }
   }
 
-  def computeMPIncrementabilityForLatencyConstraint(): Double = {
-    var min = MAX_INCREMENTABILITY
+  def computeMPIncrementabilityForLatencyConstraint(smallInc: Boolean): Double = {
+    val limit =
+      if (smallInc) MAX_INCREMENTABILITY
+      else MIN_INCREMENTABILITY
+
+    var curLimit = limit
     var cur: Double = 0
 
     for (i <- 0 until mpCount) {
@@ -1023,7 +1029,7 @@ class SlothSubPlan {
       newBatchNums(i) -= BATCHNUM_STEP
 
       if (newBatchNums(i) <= MIN_BATCHNUM - 1 || newBatchNums(i) < mpParentBatchNum) {
-        cur = MAX_INCREMENTABILITY
+        cur = limit
       } else {
         val isOuterSide =
           if (antiOuterCase) mpIsOuter(i)
@@ -1035,13 +1041,20 @@ class SlothSubPlan {
         }
       }
 
-      if (cur < min) {
-        min = cur
-        curMPIdx = i
+      if (smallInc) {
+        if (cur < curLimit) {
+          curLimit = cur
+          curMPIdx = i
+        }
+      } else {
+        if (cur > curLimit) {
+          curLimit = cur
+          curMPIdx = i
+        }
       }
     }
 
-    min
+    curLimit
   }
 
   def decreaseMPBatchNum(): Unit = {

@@ -13,8 +13,8 @@ REMOTE=southport.cs.uchicago.edu
 REMOTE_SPARK=$REMOTE:/tank/hdfs/totem/slothdb/spark
 
 #scp $TPCH_JAR $SQL_JAR $EXAMPLE_JAR $REMOTE_SPARK/jars/
-#scp $TPCH_JAR $SQL_JAR $REMOTE_SPARK/jars/
-scp $TPCH_JAR $REMOTE_SPARK/jars/
+scp $TPCH_JAR $SQL_JAR $REMOTE_SPARK/jars/
+#scp $TPCH_JAR $REMOTE_SPARK/jars/
 #scp $CAT_JAR $REMOTE_SPARK/jars/
 #scp $TPCH_JAR $SQL_JAR $REMOTE_SPARK/jars/
 #scp $SQL_JAR $REMOTE_SPARK/jars/
