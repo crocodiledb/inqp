@@ -480,18 +480,20 @@ class SlothDBCostModel extends Logging {
 
     while (curResource > realConstraint) {
 
+      val smallInc = random.nextFloat < threshold
+
       val pair = subPlans.filter(_.hasNewData())
         .map(findParentBatchNum(_))
         .map(subPlan => {
 
-          val incability = subPlan.computeMPIncrementabilityForLatencyConstraint()
+          val incability = subPlan.computeMPIncrementabilityForLatencyConstraint(smallInc)
 
           (incability, subPlan.index)
         }).filter(pair => {
         pair._1 != MAX_INCREMENTABILITY
       }).reduceLeft(
         (pairA, pairB) => {
-          if (random.nextFloat < threshold) {
+          if (smallInc) {
             if (pairA._1 < pairB._1) pairA
             else pairB
           } else {

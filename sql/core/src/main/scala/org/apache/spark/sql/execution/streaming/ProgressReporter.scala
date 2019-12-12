@@ -257,7 +257,7 @@ trait ProgressReporter extends Logging {
 
         // if (execution_mode != SlothDBContext.SLOTHINCSTAT) {
         pw.print(f"${name}\t${constraint}\t${currentBatchId}\t${inc_aware}" +
-            f"\t${shuffleNum}\t${cost_bias}\t${totalTimeSec}%.2f\t${lastTimeSec}%.2f" +
+            f"\t${shuffleNum}\t${inc_percentage}\t${totalTimeSec}%.2f\t${lastTimeSec}%.2f" +
             f"\t${totalRows}\n")
         // } else {
         //   val batchNum = sparkSession.conf.get(SQLConf.SLOTHDB_BATCH_NUM).getOrElse(1)
