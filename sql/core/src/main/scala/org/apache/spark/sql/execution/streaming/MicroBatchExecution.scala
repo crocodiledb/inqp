@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.execution.streaming
 
+import java.io.{FileWriter, IOException, PrintWriter}
 import java.util.Optional
 
 import scala.collection.JavaConverters._
@@ -173,6 +174,35 @@ class MicroBatchExecution(
     }).toMap
   }
 
+  private def reportSlothOverhead(maxStep: Int, overhead: Double): Unit = {
+    var overheadFile: String = null
+    try {
+      val dir = slothdbStatDir
+      if (dir != null) {
+        overheadFile = dir + "/slothoverhead.stat"
+        val constraint =
+          if (sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).isDefined) {
+            sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).get
+          } else if (sparkSession.conf.get(SQLConf.SLOTHDB_RESOURCE_CONSTRAINT).isDefined) {
+            sparkSession.conf.get(SQLConf.SLOTHDB_RESOURCE_CONSTRAINT).get
+          } else {
+            -1
+          }
+        val pw = new PrintWriter(new FileWriter(overheadFile, true))
+
+        pw.print(f"${name}\t${constraint}\t${maxStep}\t${overhead}\n")
+
+        pw.close()
+
+      }
+    } catch {
+      case _: NoSuchElementException =>
+        logInfo("SlothDB Stats Dir is not set")
+      case _: IOException =>
+        logError(s"Writing ${overheadFile} error")
+    }
+  }
+
   /**
    * Repeatedly attempts to run batches as data arrives.
    */
@@ -186,14 +216,20 @@ class MicroBatchExecution(
 
       if (execution_mode != SLOTHTRAINING) {
         val incAware =
-          if (execution_mode == INCAWARE_SUBPLAN || execution_mode == INCAWARE_PATH) true
-          else false
+          if (execution_mode == INCAWARE_SUBPLAN ||
+            execution_mode == INCAWARE_PATH ||
+            execution_mode == SLOTHOVERHEAD) {
+            true
+          } else {
+            false
+          }
 
         val mpDecompose =
-          if (execution_mode == INCAWARE_PATH) true
+          if (execution_mode == INCAWARE_PATH || execution_mode == SLOTHOVERHEAD) true
           else false
 
         val costBias = sparkSession.conf.get(SQLConf.SLOTHDB_COST_MODEL_BIAS).getOrElse(1.0)
+        val maxStep = sparkSession.conf.get(SQLConf.SLOTHDB_MAX_STEP).getOrElse(100)
 
         slothCostModel.initialize(logicalPlan,
           name,
@@ -201,10 +237,13 @@ class MicroBatchExecution(
           sparkSession.conf.get(SQLConf.SHUFFLE_PARTITIONS.key).toInt,
           mpDecompose,
           incAware,
-          costBias)
+          costBias,
+          maxStep,
+          execution_mode == SLOTHOVERHEAD)
 
         if (execution_mode != SLOTHINCSTAT) {
           slothCostModel.loadEndOffsets(getFinalOffsets())
+          val start = System.nanoTime()
           if (sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).isDefined) {
             val latency_constraint =
               sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).get
@@ -217,6 +256,11 @@ class MicroBatchExecution(
             val inc_percentage =
               sparkSession.conf.get(SQLConf.SLOTHDB_INC_PERCENTAGE).getOrElse(1.0)
             slothCostModel.genTriggerPlanForResourceConstraint(resource_constraint, inc_percentage)
+          }
+          val overhead = ((System.nanoTime() - start)/1000000).toDouble
+          if (execution_mode == SLOTHOVERHEAD) {
+            reportSlothOverhead(maxStep, overhead)
+            return
           }
         }
       }

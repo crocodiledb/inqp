@@ -150,6 +150,11 @@ object SQLConf {
     }
   }
 
+  val SLOTHDB_MAX_STEP = buildConf("spark.sql.slothdb.maxstep")
+    .doc("Max number of steps for simulation algorithm")
+    .intConf
+    .createOptional
+
   val SLOTHDB_EXECUTION_MODE = buildConf("spark.sql.slothdb.executionmode")
     .doc("In which way we execute the query: " +
       "0 -> incrementability-aware;" +

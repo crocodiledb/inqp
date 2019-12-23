@@ -42,6 +42,7 @@ class SlothDBCostModel extends Logging {
   var totalBatchNum: Int = _
   var totalBatchStep: Int = _
   var incAware: Boolean = _
+  var testOverhead: Boolean = _
 
   var BATCH_LATENCY: Double = _
   var BATCH_RESOURCE: Double = _
@@ -66,8 +67,13 @@ class SlothDBCostModel extends Logging {
                  numPart: Int,
                  mpDecompose: Boolean,
                  incAware: Boolean,
-                 costBias: Double): Unit = {
+                 costBias: Double,
+                 maxStep: Int,
+                 testOverhead: Boolean): Unit = {
     this.incAware = incAware
+    this.testOverhead = testOverhead
+
+    SlothDBCostModel.MAX_BATCHNUM = maxStep
 
     val biasArray =
       if (costBias > 0.0) overEstBias
@@ -104,7 +110,6 @@ class SlothDBCostModel extends Logging {
       batchSteps = Array.fill[Int](subPlans.length)(0)
       currentStep = 0
     }
-
   }
 
   private def buildPlan(logicalPlan: LogicalPlan,
@@ -198,7 +203,7 @@ class SlothDBCostModel extends Logging {
     var index = 0
 
     val rootSubPlan = new SlothSubPlan
-    rootSubPlan.initialize(op.copy(), index, -1, mpDecompose)
+    rootSubPlan.initialize(op.copy(), index, -1, mpDecompose, testOverhead)
     subPlanSet.append(rootSubPlan)
 
     while (index < subPlanSet.length) {
@@ -232,7 +237,7 @@ class SlothDBCostModel extends Logging {
       val childSubPlan = new SlothSubPlan
       val childIndex = subPlanSet.length
       childSubPlan.initialize(op.copy().setLowerBlockingOperator(true),
-        childIndex, subPlan.index, mpDecompose)
+        childIndex, subPlan.index, mpDecompose, testOverhead)
       subPlan.addChildDep(childIndex)
       subPlanSet.append(childSubPlan)
       return 1;
@@ -318,8 +323,18 @@ class SlothDBCostModel extends Logging {
   : Unit = {
     val realConstraint = latencyConstraint * BATCH_LATENCY
 
-    if (incAware && mpDecompose) {
-      genMPPlanForLatencyConstraint(latencyConstraint, threshold)
+    if (testOverhead) {
+      if (OPT_METHOD == OPT_GREEDY) {
+        genMPPlanForLatencyConstraintOverhead(latencyConstraint, threshold)
+      } else {
+        genMPPlanUsingRandomOrBruteforce(latencyConstraint)
+      }
+    } else if (incAware && mpDecompose) {
+      if (OPT_METHOD == OPT_GREEDY) {
+        genMPPlanForLatencyConstraint(latencyConstraint, threshold)
+      } else {
+        genMPPlanUsingRandomOrBruteforce(latencyConstraint)
+      }
     } else if (incAware) {
       val tmpBatchNums = Array.fill[Int](subPlans.length)(MAX_BATCHNUM)
       var curLatency = computeLatencyForSubPlans(subPlans, tmpBatchNums, true, cardinalityOnly)
@@ -486,7 +501,8 @@ class SlothDBCostModel extends Logging {
         .map(findParentBatchNum(_))
         .map(subPlan => {
 
-          val incability = subPlan.computeMPIncrementabilityForLatencyConstraint(smallInc)
+          val incability =
+            subPlan.computeMPIncrementabilityForLatencyConstraint(smallInc)
 
           (incability, subPlan.index)
         }).filter(pair => {
@@ -534,7 +550,8 @@ class SlothDBCostModel extends Logging {
         .map(findParentBatchNum(_))
         .map(subPlan => {
 
-          val incability = subPlan.computeMPIncrementabilityForLatencyConstraint(smallInc)
+          val incability =
+            subPlan.computeMPIncrementabilityForLatencyConstraint(smallInc)
 
           (incability, subPlan.index)
         }).filter(pair => {
@@ -581,6 +598,168 @@ class SlothDBCostModel extends Logging {
       })
       subPlan.mpParentBatchNum = parentBatchNum
     }
+
+    subPlan
+  }
+
+  def genMPPlanUsingRandomOrBruteforce(latencyConstraint: Double): Unit = {
+    val realConstraint = latencyConstraint * BATCH_LATENCY
+
+    val subPlanBatchNum = new Array[Array[Int]](subPlans.size)
+    for (i <- 0 until subPlans.length) {
+      subPlanBatchNum(i) = Array.fill(subPlans(i).mpCount)(MAX_BATCHNUM)
+      if (OPT_METHOD == OPT_SAMPLE) subPlans(i).putBatchNum(subPlanBatchNum(i))
+    }
+    var minResource = computeResourceForMPsSimple(subPlans, true, cardinalityOnly)
+
+    var timeA = 0L
+    var timeB = 0L
+    var validCount = 0
+
+    if (OPT_METHOD == OPT_SAMPLE) {
+      var count = 0
+
+      while (count < SAMPLE_THRESHOLD) {
+
+        var start = System.nanoTime()
+        subPlans.foreach(_.nextMPBatchNum())
+        val isValidBatchNums =
+          !subPlans.filter(_.hasNewData())
+            .map(findParentBatchNum(_))
+            .exists(!_.validBatchNums())
+        timeA += System.nanoTime() - start
+
+        start = System.nanoTime()
+        if (isValidBatchNums) {
+          validCount += 1
+          val newLatency = computeLatencyForMPsSimple(subPlans, true, cardinalityOnly)
+          if (newLatency < realConstraint) {
+            val newResource = computeResourceForMPsSimple(subPlans, true, cardinalityOnly)
+            if (newResource < minResource) {
+              minResource = newResource
+              for (i <- 0 until subPlans.length) {
+                subPlans(i).getBatchNum(subPlanBatchNum(i))
+              }
+            }
+          }
+        }
+        timeB += System.nanoTime() - start
+
+        count += 1
+      }
+
+      printf(s"${timeA/1000}, ${timeB/1000}, ${validCount}\n")
+
+    } else {
+      val totalMPCount = math.pow(MAX_BATCHNUM, subPlans.map(_.mpCount).sum).toLong
+      var curIdx = 0
+      while (curIdx < totalMPCount) {
+        var tmpCurIdx = curIdx
+        subPlans.foreach(subPlan => {
+          for (i <- 0 until subPlan.mpCount) {
+            subPlan.mpBatchNums(i) = tmpCurIdx % MAX_BATCHNUM + 1
+            tmpCurIdx = tmpCurIdx / MAX_BATCHNUM
+          }
+        })
+
+        val isValidBatchNums =
+           !subPlans.filter(_.hasNewData())
+            .map(findParentBatchNum(_))
+            .exists(!_.validBatchNums())
+
+        if (isValidBatchNums) {
+          val newLatency = computeLatencyForMPsSimple(subPlans, true, cardinalityOnly)
+          if (newLatency < realConstraint) {
+            val newResource = computeResourceForMPsSimple(subPlans, true, cardinalityOnly)
+            if (newResource < minResource) {
+              for (i <- 0 until subPlans.length) {
+                subPlans(i).getBatchNum(subPlanBatchNum(i))
+              }
+            }
+          }
+
+          validCount += 1
+        }
+
+        curIdx += 1
+
+        if ((curIdx + 1) % 100000 == 0) printf(s"${curIdx + 1}\n")
+      }
+      printf(s"${validCount}\n")
+    }
+  }
+
+  def genMPPlanForLatencyConstraintOverhead(latencyConstraint: Double, threshold: Double)
+  : Unit = {
+    val realConstraint = latencyConstraint * BATCH_LATENCY
+
+    var curLatency = computeLatencyForMPsSimple(subPlans, true, cardinalityOnly)
+    var preIndex: Int = -1
+
+    var timeA = 0L
+    var timeB = 0L
+    var validCount = 0
+
+    var terminate = false
+
+    while (curLatency > realConstraint && !terminate) {
+
+      val pair = subPlans.filter(_.hasNewData())
+        .map(findChildBatchNum(_))
+        .map(subPlan => {
+
+          val start = System.nanoTime()
+          val incability =
+            subPlan.computeMPIncrementabilityForOverhead()
+          timeA += (System.nanoTime() - start)
+
+          (incability, subPlan.index)
+        }).reduceLeft(
+        (pairA, pairB) => {
+          if (pairA._1 < pairB._1) pairB
+          else pairA
+        })
+
+      if (pair._1 == MIN_INCREMENTABILITY) {
+        terminate = true
+      } else {
+        preIndex = pair._2
+        subPlans(preIndex).increaseMPBatchNum()
+        subPlans(preIndex).applyLRPair()
+
+        val start = System.nanoTime()
+        validCount += 1
+        val newLatency = computeLatencyForMPsSimple(subPlans, true, cardinalityOnly)
+        if (math.abs((newLatency - curLatency)/curLatency) < CHANGE_THRESHOLD) {
+          subPlans(preIndex).increaseDeltaStep()
+        } else {
+          subPlans(preIndex).resetDeltaStep()
+        }
+        curLatency = newLatency
+        timeB += (System.nanoTime() - start)
+      }
+    }
+
+    printf(s"${timeA/1000}, ${timeB/1000}, ${validCount}\n")
+
+    subPlans.foreach(subPlan => {
+      subPlan.mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
+        printf(s"${batchNumWithIndex._2}: ${batchNumWithIndex._1}\n")
+      })})
+  }
+
+  private def findChildBatchNum(subPlan: SlothSubPlan): SlothSubPlan = {
+    subPlan.getChildDep().foreach(childIndex => {
+      val childSubPlan = subPlans(childIndex)
+      for (i <- 0 until subPlan.mpCount) {
+        if (!subPlan.mpIsSource(i)) {
+          val opIdx = subPlan.mpOPIndex(i)
+          if (subPlan.blockingOperators(opIdx).id == childSubPlan.root.id) {
+            subPlan.mpChildBatchNums(i) = childSubPlan.mpBatchNums.max
+          }
+        }
+      }
+    })
 
     subPlan
   }
@@ -902,7 +1081,14 @@ class SlothSubPlan {
   var mpBatchSteps: Array[Int] = _
   var mpExecutable: Array[Boolean] = _
   var mpIsSource: ArrayBuffer[Boolean] = new ArrayBuffer[Boolean]()
+  var mpChildBatchNums: Array[Int] = _
   var mpOPIndex: ArrayBuffer[Int] = new ArrayBuffer[Int]()
+
+  var mpDeltaSteps: Array[Int] = _
+  var prevLatency: Double = Double.MinValue
+  var prevResource: Double = Double.MinValue
+  var tmpPrevLatency: Double = Double.MinValue
+  var tmpPrevResource: Double = Double.MinValue
 
   var mpParentBatchNum: Int = MIN_BATCHNUM - 1
 
@@ -963,6 +1149,8 @@ class SlothSubPlan {
 
   var curMPIdx: Int = -1
 
+  val rnd = scala.util.Random
+
   def computeInc(tupleA: (Double, Double),
                               tupleB: (Double, Double)): Double = {
     (tupleB._1 - tupleA._1)/(tupleA._2 - tupleB._2)
@@ -971,49 +1159,59 @@ class SlothSubPlan {
   def computeIncForLatencyHelper(newBatchNums: Array[Int],
                                  isSource: Boolean,
                                  isOuterSide: Boolean,
-                                 antiOutercase: Boolean): Double = {
-    if (antiOutercase) {
-      // This is for anti/outer join
+                                 antiOutercase: Boolean,
+                                 testOverhead: Boolean): Double = {
+    if (testOverhead) {
+      val lrPairA = computeLRbyBatchNumsSimple(mpBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly)
+      val lrPairB = computeLRbyBatchNumsSimple(newBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly)
 
-      val lrPairALarger = computeLRbyBatchNums(mpBatchNums, mpIsSource.toArray,
-        root, true, cardinalityOnly, true)
-      val lrPairASmaller = computeLRbyBatchNums(mpBatchNums, mpIsSource.toArray,
-        root, true, cardinalityOnly, true)
-      val lrPairBLarger = computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
-        root, true, cardinalityOnly, true)
-      val lrPairBSmaller = computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
-        root, true, cardinalityOnly, true)
-
-      val incArray = new ArrayBuffer[Double]()
-      incArray.append(computeInc(lrPairALarger, lrPairBLarger))
-      incArray.append(computeInc(lrPairALarger, lrPairBSmaller))
-      incArray.append(computeInc(lrPairASmaller, lrPairBLarger))
-      incArray.append(computeInc(lrPairASmaller, lrPairBLarger))
-
-      if (isOuterSide) {
-        return Double.MinValue
-      } else {
-        return incArray.toArray.max
-      }
+      (lrPairB._1 - lrPairA._1) / (lrPairA._2 - lrPairB._2)
     } else {
-      // This is for aggregate
-      val pairALarger = isSource
-      val pairBLarger =
-        if (isSource) pairALarger
-        else false
+      if (antiOutercase) {
+        // This is for anti/outer join
 
-      val lrPairA = computeLRbyBatchNums(mpBatchNums, mpIsSource.toArray,
-        root, true, cardinalityOnly, pairALarger)
-      val lrPairB = computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
-      root, true, cardinalityOnly, pairBLarger)
+        val lrPairALarger = computeLRbyBatchNums(mpBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly, true)
+        val lrPairASmaller = computeLRbyBatchNums(mpBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly, true)
+        val lrPairBLarger = computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly, true)
+        val lrPairBSmaller = computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly, true)
 
-      val newlrPairB =
-        if (isSource && lrPairA._2 < lrPairB._2) {
-          computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
-            root, true, cardinalityOnly, false)
-        } else lrPairB
+        val incArray = new ArrayBuffer[Double]()
+        incArray.append(computeInc(lrPairALarger, lrPairBLarger))
+        incArray.append(computeInc(lrPairALarger, lrPairBSmaller))
+        incArray.append(computeInc(lrPairASmaller, lrPairBLarger))
+        incArray.append(computeInc(lrPairASmaller, lrPairBLarger))
 
-      (newlrPairB._1 - lrPairA._1)/(lrPairA._2 - newlrPairB._2)
+        if (isOuterSide) {
+          return Double.MinValue
+        } else {
+          return incArray.toArray.max
+        }
+      } else {
+        // This is for aggregate
+        val pairALarger = isSource
+        val pairBLarger =
+          if (isSource) pairALarger
+          else false
+
+        val lrPairA = computeLRbyBatchNums(mpBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly, pairALarger)
+        val lrPairB = computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly, pairBLarger)
+
+        val newlrPairB =
+          if (isSource && lrPairA._2 < lrPairB._2) {
+            computeLRbyBatchNums(newBatchNums, mpIsSource.toArray,
+              root, true, cardinalityOnly, false)
+          } else lrPairB
+
+        (newlrPairB._1 - lrPairA._1) / (lrPairA._2 - newlrPairB._2)
+      }
     }
   }
 
@@ -1024,6 +1222,7 @@ class SlothSubPlan {
 
     var curLimit = limit
     var cur: Double = 0
+    val testOverhead = false
 
     for (i <- 0 until mpCount) {
       val newBatchNums = Array.fill(mpCount)(0)
@@ -1037,7 +1236,7 @@ class SlothSubPlan {
           if (antiOuterCase) mpIsOuter(i)
           else false
         cur = computeIncForLatencyHelper(newBatchNums, mpIsSource(i),
-          isOuterSide, antiOuterCase)
+          isOuterSide, antiOuterCase, testOverhead)
         if (mpCount == 3) {
           val a = 0
         }
@@ -1059,6 +1258,55 @@ class SlothSubPlan {
     curLimit
   }
 
+
+  def computeMPIncrementabilityForOverhead(): Double = {
+
+    val limit = MIN_INCREMENTABILITY
+    var curLimit = limit
+    var cur: Double = 0
+
+    var lrPair: Tuple2[Double, Double] = null
+
+    for (i <- 0 until mpCount) {
+      val newBatchNums = Array.fill(mpCount)(0)
+      mpBatchNums.copyToArray(newBatchNums)
+      newBatchNums(i) += mpDeltaSteps(i)
+
+      if (newBatchNums(i) >= MAX_BATCHNUM + 1) {
+        cur = limit
+      } else if (newBatchNums(i) > mpChildBatchNums(i)) {
+        cur = limit
+      } else {
+        if (prevLatency == Double.MinValue) {
+          val tmplrPair = computeLRbyBatchNumsSimple(mpBatchNums, mpIsSource.toArray,
+            root, true, cardinalityOnly)
+          prevLatency = tmplrPair._1
+          prevResource = tmplrPair._2
+        }
+
+        lrPair = computeLRbyBatchNumsSimple(newBatchNums, mpIsSource.toArray,
+          root, true, cardinalityOnly)
+
+        cur = (lrPair._1 - prevLatency) / (prevResource - lrPair._2)
+      }
+
+      if (cur > curLimit) {
+        curLimit = cur
+        curMPIdx = i
+
+        tmpPrevLatency = lrPair._1
+        tmpPrevResource = lrPair._2
+      }
+    }
+
+    curLimit
+  }
+
+  def applyLRPair(): Unit = {
+    prevLatency = tmpPrevLatency
+    prevResource = tmpPrevResource
+  }
+
   def decreaseMPBatchNum(): Unit = {
     // if (mpCount == 3) {
     //   mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
@@ -1066,12 +1314,54 @@ class SlothSubPlan {
     //   })
     //   printf("\n")
     // }
-    mpBatchNums(curMPIdx) -= 1
+    mpBatchNums(curMPIdx) -= mpDeltaSteps(curMPIdx)
   }
 
   def increaseMPBatchNum(): Unit = {
-    mpBatchNums(curMPIdx) += 1
+    mpBatchNums(curMPIdx) += mpDeltaSteps(curMPIdx)
   }
+
+  def increaseDeltaStep(): Unit = {
+    val exp_step = mpDeltaSteps(curMPIdx) * BATCHNUM_FACTOR
+    val remain_step = MAX_BATCHNUM - mpBatchNums(curMPIdx)
+    mpDeltaSteps(curMPIdx) =
+      math.max(BATCHNUM_STEP,
+        math.min(exp_step, remain_step))
+  }
+
+  def resetDeltaStep(): Unit = {
+    mpDeltaSteps(curMPIdx) = BATCHNUM_STEP
+  }
+
+  // The following two are for random sampling and brute force
+  def nextMPBatchNum(): Unit = {
+    for (i <- 0 until mpCount) mpBatchNums(i) = rnd.nextInt(MAX_BATCHNUM) + 1
+  }
+
+  def maxBatchNum(): Boolean = {
+    !mpBatchNums.exists(_ < MAX_BATCHNUM)
+  }
+
+  def putBatchNum(batchNums: Array[Int]): Unit = {
+    for (i <- 0 until mpCount) {
+      mpBatchNums(i) = batchNums(i)
+    }
+  }
+
+  def getBatchNum(batchNums: Array[Int]): Unit = {
+    for (i <- 0 until mpCount) {
+      batchNums(i) = mpBatchNums(i)
+    }
+  }
+
+  def validBatchNums(): Boolean = {
+    for (i <- 0 until mpCount) {
+      if (mpBatchNums(i) < mpParentBatchNum) return false
+    }
+
+    true
+  }
+
 
   var antiOuterCase: Boolean = _
   var mpIsOuter: Array[Boolean] = _
@@ -1083,10 +1373,10 @@ class SlothSubPlan {
     // For finding outer join
     if (isJoinOperator(op)) {
       val joinOP = op.asInstanceOf[JoinCostModel]
-      if (joinOP.joinType == LeftOuter.toString ||
-        joinOP.joinType == RightOuter.toString ||
-        joinOP.joinType == FullOuter.toString ||
-        joinOP.joinType == LeftAnti.toString) {
+      if (joinOP.joinType == LeftOuter ||
+        joinOP.joinType == RightOuter ||
+        joinOP.joinType == FullOuter ||
+        joinOP.joinType == LeftAnti) {
         antiOuterCase = true
       }
     }
@@ -1096,12 +1386,12 @@ class SlothSubPlan {
       if (isJoinOperator(parentOP)) {
         val joinOP = parentOP.asInstanceOf[JoinCostModel]
         if (
-          (isLeft && (joinOP.joinType == LeftOuter.toString ||
-          joinOP.joinType == FullOuter.toString ||
-          joinOP.joinType == LeftAnti.toString))
+          (isLeft && (joinOP.joinType == LeftOuter ||
+          joinOP.joinType == FullOuter ||
+          joinOP.joinType == LeftAnti))
           ||
-          (!isLeft && (joinOP.joinType == RightOuter.toString ||
-            joinOP.joinType == FullOuter.toString))
+          (!isLeft && (joinOP.joinType == RightOuter ||
+            joinOP.joinType == FullOuter))
         ) {
           isOuterBuf.append(true)
         } else {
@@ -1131,7 +1421,7 @@ class SlothSubPlan {
   }
 
   def initialize(root: OperatorCostModel, index: Int, parentDep: Int,
-                 mpDecompose: Boolean): Unit = {
+                 mpDecompose: Boolean, testOverhead: Boolean): Unit = {
     this.root = root
     this.index = index
     this.parentDep = parentDep
@@ -1144,7 +1434,14 @@ class SlothSubPlan {
     // this.mpIsOuter = findAntiOuterCase()
 
     if (mpDecompose) {
-      mpBatchNums = Array.fill(mpCount)(MAX_BATCHNUM)
+      if (!testOverhead) {
+        mpBatchNums = Array.fill(mpCount)(MAX_BATCHNUM)
+      } else {
+        mpBatchNums = Array.fill(mpCount)(1)
+      }
+
+      mpChildBatchNums = Array.fill(mpCount)(Int.MaxValue)
+      mpDeltaSteps = Array.fill(mpCount)(BATCHNUM_STEP)
       mpBatchSteps = Array.fill(mpCount)(0)
       mpExecutable = Array.fill(mpCount)(false)
     }
@@ -1326,8 +1623,10 @@ object SlothDBCostModel {
   val OTHERUNITCOST = 1L
 
   val MIN_BATCHNUM = 1
-  val MAX_BATCHNUM = 100
+  var MAX_BATCHNUM = 100
   val BATCHNUM_STEP = 1
+  val BATCHNUM_FACTOR = 1
+  val CHANGE_THRESHOLD = 0.01
 
   val MAX_INCREMENTABILITY = Double.MaxValue
   val MIN_INCREMENTABILITY = Double.MinValue
@@ -1337,6 +1636,12 @@ object SlothDBCostModel {
   val MIN_RESOURCE = Double.MinValue
 
   val cardinalityOnly: Boolean = false
+
+  val OPT_SAMPLE = 0
+  val OPT_BRUTEFORCE = 1
+  val OPT_GREEDY = 2
+  val OPT_METHOD = OPT_BRUTEFORCE
+  val SAMPLE_THRESHOLD = 100000
 
   def findNodeType(sparkPlan: SparkPlan): Int = {
     sparkPlan match {
@@ -1460,6 +1765,32 @@ object SlothDBCostModel {
                            cardinalityOnly: Boolean,
                            larger: Boolean): (Double, Double) = {
     root.getLRByBatchNums(batchNums, mpIsSource, subPlanAware, cardinalityOnly, larger)
+  }
+
+  def computeLRbyBatchNumsSimple(batchNums: Array[Int],
+                           mpIsSource: Array[Boolean],
+                           root: OperatorCostModel,
+                           subPlanAware: Boolean,
+                           cardinalityOnly: Boolean): (Double, Double) = {
+    root.getFastLRByBatchNums(batchNums, mpIsSource, subPlanAware, cardinalityOnly)
+  }
+
+  def computeLatencyForMPsSimple(subPlans: Array[SlothSubPlan],
+                           subPlanAware: Boolean,
+                           cardinalityOnly: Boolean): Double = {
+    subPlans.map(plan => {
+      computeLRbyBatchNumsSimple(plan.mpBatchNums, plan.mpIsSource.toArray,
+        plan.root, subPlanAware, cardinalityOnly)._1
+    }).sum
+  }
+
+  def computeResourceForMPsSimple(subPlans: Array[SlothSubPlan],
+                           subPlanAware: Boolean,
+                           cardinalityOnly: Boolean): Double = {
+    subPlans.map(plan => {
+      computeLRbyBatchNumsSimple(plan.mpBatchNums, plan.mpIsSource.toArray,
+        plan.root, subPlanAware, cardinalityOnly)._2
+    }).sum
   }
 
   def computeLatencyForMPs(subPlans: Array[SlothSubPlan],

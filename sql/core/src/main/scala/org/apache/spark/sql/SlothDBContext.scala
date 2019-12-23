@@ -26,4 +26,5 @@ object SlothDBContext {
   val INCOBLIVIOUS = 2
   val SLOTHINCSTAT = 3
   val SLOTHTRAINING = 4
+  val SLOTHOVERHEAD = 5
 }

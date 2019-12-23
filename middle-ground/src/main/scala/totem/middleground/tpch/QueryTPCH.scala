@@ -23,10 +23,10 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
 
-class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
-                 shuffleNum: String, statDIR: String, SF: Double, hdfsRoot: String,
-                 execution_mode: String, inputPartitions: Int, constraint: String,
-                 largeDataset: Boolean, iOLAPConf: Int, incPercentage: String, costBias: String)
+class QueryTPCH (bootstrap: String, query: String, numBatch: Int, shuffleNum: String,
+                 statDIR: String, SF: Double, hdfsRoot: String, execution_mode: String,
+                 inputPartitions: Int, constraint: String, largeDataset: Boolean,
+                 iOLAPConf: Int, incPercentage: String, costBias: String, maxStep: String)
 {
   val iOLAP_Q11_src = "/q11_config.csv"
   val iOLAP_Q17_src = "/q17_config.csv"
@@ -65,6 +65,7 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
       .set(SQLConf.SLOTHDB_QUERYNAME.key, query_name)
       .set(SQLConf.SLOTHDB_INC_PERCENTAGE.key, incPercentage)
       .set(SQLConf.SLOTHDB_COST_MODEL_BIAS.key, costBias)
+      .set(SQLConf.SLOTHDB_MAX_STEP.key, maxStep)
 
     val digit_constraint = constraint.toDouble
     if (digit_constraint <= 1.0) sparkConf.set(SQLConf.SLOTHDB_LATENCY_CONSTRAINT.key, constraint)
@@ -1000,19 +1001,19 @@ class QueryTPCH (bootstrap: String, query: String, numBatch: Int,
 object QueryTPCH {
   def main(args: Array[String]): Unit = {
 
-    if (args.length < 14) {
+    if (args.length < 15) {
       System.err.println("Usage: QueryTPCH <bootstrap-servers> <query>" +
         "<numBatch> <number-shuffle-partition> <statistics dir> <SF> <HDFS root>" +
         "<execution mode [0: inc-aware(subpath), 1: inc-aware(subplan), 2: inc-oblivious, " +
         "3: generate inc statistics, 4: training]>  <num of input partitions>" +
         "<performance constraint> <large dataset> <iOLAP Config> <inc_percentage>" +
-        "<cost model bias>")
+        "<cost model bias> <max step>")
       System.exit(1)
     }
 
     val tpch = new QueryTPCH(args(0), args(1), args(2).toInt, args(3),
       args(4), args(5).toDouble, args(6), args(7), args(8).toInt, args(9),
-      args(10).toBoolean, args(11).toInt, args(12), args(13))
+      args(10).toBoolean, args(11).toInt, args(12), args(13), args(14))
     tpch.execQuery(args(1))
   }
 }

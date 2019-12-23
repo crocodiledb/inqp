@@ -20,7 +20,7 @@ package org.apache.spark.sql
 import scala.collection.mutable.ArrayBuffer
 import scala.math._
 
-import org.apache.spark.sql.catalyst.plans.{FullOuter, LeftAnti, LeftOuter, RightOuter}
+import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
 
@@ -343,6 +343,91 @@ abstract class OperatorCostModel {
     }
   }
 
+  private def findNextStepArray(batchNums: Array[Int],
+                                batchSteps: Array[Int],
+                                indexArray: Array[Int]): Int = {
+
+    // var count = 0
+
+    // batchSteps.zipWithIndex.foreach(pair => {
+    //   val step = pair._1
+    //   val index = pair._2
+    //   if (step != batchNums(index)) {
+    //     indexArray(count) = index
+    //     count += 1
+    //   }
+    // })
+
+    // count
+
+    val lowestPair = batchNums.zipWithIndex.reduceLeft((pairA, pairB) => {
+      val batchNumA = pairA._1.toDouble
+      val batchIdxA = pairA._2
+      val batchNumB = pairB._1.toDouble
+      val batchIdxB = pairB._2
+
+      val progressA = (batchSteps(batchIdxA) + 1).toDouble/batchNumA
+      val progressB = (batchSteps(batchIdxB) + 1).toDouble/batchNumB
+      if (progressA <= progressB) pairA
+      else pairB
+    })
+
+    val batchNum = lowestPair._1.toDouble
+    val batchIdx = lowestPair._2
+    val lowestProgress = (batchSteps(batchIdx) + 1).toDouble/batchNum
+
+    var count = 0
+
+    batchNums.zipWithIndex.foreach(pair => {
+      val batchNum = pair._1.toDouble
+      val batchIdx = pair._2
+
+      val progress = (batchSteps(batchIdx) + 1).toDouble/batchNum
+      if (math.abs(progress - lowestProgress) < 0.00000001) {
+        indexArray(count) = batchIdx
+        count += 1
+      }
+    })
+
+    count
+  }
+
+  def getFastLRByBatchNums(batchNums: Array[Int],
+                             mpIsSource: Array[Boolean],
+                             subPlanAware: Boolean,
+                             cardinalityOnly: Boolean): (Double, Double) = {
+    this.reset(cardinalityOnly)
+    this.preProcess()
+
+    val totalSteps = batchNums.sum
+    var remainSteps = totalSteps
+    val batchSteps = Array.fill(batchNums.length)(0)
+    val indexArray = Array.fill(batchNums.length)(0)
+
+    var end = false
+    while (!end) {
+      val count = findNextStepArray(batchNums, batchSteps, indexArray)
+      for (i <- 0 until count) batchSteps(indexArray(i)) += 1
+      remainSteps -= count
+
+      val isLastBatch = (remainSteps == 0)
+      val executable =
+        if (!isLastBatch) {
+          val tmpExecutable = Array.fill(batchNums.length)(false)
+          for (i <- 0 until count) tmpExecutable(indexArray(i)) = true
+          tmpExecutable
+        } else {
+          Array.fill(batchNums.length)(true)
+        }
+      this.getNextBatch(batchNums, isLastBatch, executable)
+
+      end = isLastBatch
+    }
+
+    val pair = this.collectLatencyAndResource(subPlanAware)
+    (pair._1 * numPart, pair._2 * numPart)
+  }
+
   def initialize(id: Int,
                  logicalPlan: LogicalPlan,
                  children: Array[OperatorCostModel],
@@ -373,7 +458,25 @@ class JoinCostModel extends OperatorCostModel {
   var leftStateSize: Double = _
   var rightStateSize: Double = _
 
-  var joinType: String = _
+  var joinType: JoinType = _
+
+  private def parseJoinType(joinString: String): JoinType = {
+    if (joinString == LeftOuter.toString) {
+      LeftOuter
+    } else if (joinString == RightOuter.toString) {
+      RightOuter
+    } else if (joinString == FullOuter.toString) {
+      FullOuter
+    } else if (joinString == LeftAnti.toString) {
+      LeftAnti
+    } else if (joinString == Cross.toString) {
+      Cross
+    } else if (joinString == LeftSemi.toString) {
+      LeftSemi
+    } else {
+      Inner
+    }
+  }
 
   override def initialize(id: Int,
                           logicalPlan: LogicalPlan,
@@ -382,7 +485,7 @@ class JoinCostModel extends OperatorCostModel {
                           configs: Array[String],
                           costBias: Double): Unit = {
     initHelper(id, logicalPlan, children, numPart)
-    joinType = configs(1)
+    joinType = parseJoinType(configs(1))
     left_insert_to_insert = configs(2).toDouble * costBias
     left_delete_to_delete = configs(3).toDouble * costBias
     left_update_to_update = configs(4).toDouble * costBias
@@ -453,9 +556,9 @@ class JoinCostModel extends OperatorCostModel {
     val left_update_output = leftInput._3 * left_update_to_update * rightStateSize
 
     // Outer parts: left side
-    if (joinType == LeftOuter.toString ||
-      joinType == FullOuter.toString ||
-      joinType == LeftAnti.toString) {
+    if (joinType == LeftOuter ||
+      joinType == FullOuter ||
+      joinType == LeftAnti) {
       left_insert_output += leftInput._1 * pow(1 - left_insert_to_insert, rightStateSize)
       left_delete_output += leftInput._2 * pow(1 - left_delete_to_delete, rightStateSize)
       left_insert_output += leftInput._3 * pow(1 - left_update_to_update, rightStateSize)
@@ -463,8 +566,8 @@ class JoinCostModel extends OperatorCostModel {
     }
 
     // Outer parts: right side
-    if (joinType == RightOuter.toString ||
-      joinType == FullOuter.toString) {
+    if (joinType == RightOuter ||
+      joinType == FullOuter) {
       left_delete_output += leftInput._1 * rightStateSize *
         left_insert_to_insert * rightMatchRatio
       left_insert_output += leftInput._2 * rightStateSize *
@@ -488,8 +591,8 @@ class JoinCostModel extends OperatorCostModel {
     val right_update_output = rightInput._3 * right_update_to_update * leftStateSize
 
     // Outer parts: left side
-    if (joinType == RightOuter.toString ||
-      joinType == FullOuter.toString) {
+    if (joinType == RightOuter ||
+      joinType == FullOuter) {
       right_insert_output += rightInput._1 * pow(1 - right_insert_to_insert, leftStateSize)
       right_delete_output += rightInput._2 * pow(1 - right_delete_to_delete, leftStateSize)
       right_insert_output += rightInput._3 * pow(1 - right_update_to_update, leftStateSize)
@@ -497,9 +600,9 @@ class JoinCostModel extends OperatorCostModel {
     }
 
     // Outer parts: right side
-    if (joinType == LeftOuter.toString ||
-      joinType == FullOuter.toString ||
-      joinType == LeftAnti.toString) {
+    if (joinType == LeftOuter ||
+      joinType == FullOuter ||
+      joinType == LeftAnti) {
       right_delete_output += rightInput._1 * leftStateSize *
         right_insert_to_insert * leftMatchRatio
       right_insert_output += rightInput._2 * leftStateSize *
