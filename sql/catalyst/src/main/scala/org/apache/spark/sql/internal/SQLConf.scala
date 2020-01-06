@@ -188,6 +188,11 @@ object SQLConf {
     .doubleConf
     .createOptional
 
+  val SLOTHDB_SAMPLE_TIME = buildConf("spark.sql.slothdb.sample.time")
+    .doc("Time invested into random sampling")
+    .doubleConf
+    .createOptional
+
   val SLOTHDB_COST_MODEL_BIAS = buildConf("spark.sql.slothdb.inc.bias")
     .doc("cost model bias")
     .doubleConf

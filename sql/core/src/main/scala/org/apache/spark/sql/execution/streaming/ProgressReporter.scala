@@ -255,8 +255,11 @@ trait ProgressReporter extends Logging {
         val cost_bias =
           sparkSession.conf.get(SQLConf.SLOTHDB_COST_MODEL_BIAS).getOrElse(1.0)
 
+        val max_step =
+          sparkSession.conf.get(SQLConf.SLOTHDB_MAX_STEP).getOrElse(100)
+
         // if (execution_mode != SlothDBContext.SLOTHINCSTAT) {
-        pw.print(f"${name}\t${constraint}\t${currentBatchId}\t${inc_aware}" +
+        pw.print(f"${name}\t${constraint}\t${max_step}\t${inc_aware}" +
             f"\t${shuffleNum}\t${inc_percentage}\t${totalTimeSec}%.2f\t${lastTimeSec}%.2f" +
             f"\t${totalRows}\n")
         // } else {

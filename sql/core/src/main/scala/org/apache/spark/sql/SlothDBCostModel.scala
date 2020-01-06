@@ -319,7 +319,8 @@ class SlothDBCostModel extends Logging {
   }
 
   // With one constraint and optimize the other one
-  def genTriggerPlanForLatencyConstraint(latencyConstraint: Double, threshold: Double)
+  def genTriggerPlanForLatencyConstraint(latencyConstraint: Double,
+                                         threshold: Double, sampleTime: Double)
   : Unit = {
     val realConstraint = latencyConstraint * BATCH_LATENCY
 
@@ -327,13 +328,13 @@ class SlothDBCostModel extends Logging {
       if (OPT_METHOD == OPT_GREEDY) {
         genMPPlanForLatencyConstraintOverhead(latencyConstraint, threshold)
       } else {
-        genMPPlanUsingRandomOrBruteforce(latencyConstraint)
+        genMPPlanUsingRandomOrBruteforce(latencyConstraint, sampleTime)
       }
     } else if (incAware && mpDecompose) {
       if (OPT_METHOD == OPT_GREEDY) {
         genMPPlanForLatencyConstraint(latencyConstraint, threshold)
       } else {
-        genMPPlanUsingRandomOrBruteforce(latencyConstraint)
+        genMPPlanUsingRandomOrBruteforce(latencyConstraint, sampleTime)
       }
     } else if (incAware) {
       val tmpBatchNums = Array.fill[Int](subPlans.length)(MAX_BATCHNUM)
@@ -393,6 +394,14 @@ class SlothDBCostModel extends Logging {
       totalBatchNum = scala.math.min(tmpTotalBatchNum + 1, MAX_BATCHNUM)
       printf(s"TotalBatchNum: ${totalBatchNum}\n")
     }
+
+    if (mpDecompose) {
+      subPlans.foreach(subPlan => {
+        subPlan.mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
+          printf(s"${batchNumWithIndex._2}: ${batchNumWithIndex._1}\n")
+        })})
+    }
+
   }
 
   def genTriggerPlanForResourceConstraint(resourceConstraint: Double, threshold: Double)
@@ -574,11 +583,6 @@ class SlothDBCostModel extends Logging {
     }
 
     if (preIndex != -1) subPlans(preIndex).increaseMPBatchNum()
-
-    subPlans.foreach(subPlan => {
-      subPlan.mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
-        printf(s"${batchNumWithIndex._2}: ${batchNumWithIndex._1}\n")
-      })})
   }
 
   private def findParentBatchNum(subPlan: SlothSubPlan): SlothSubPlan = {
@@ -602,39 +606,35 @@ class SlothDBCostModel extends Logging {
     subPlan
   }
 
-  def genMPPlanUsingRandomOrBruteforce(latencyConstraint: Double): Unit = {
+  def genMPPlanUsingRandomOrBruteforce(latencyConstraint: Double,
+                                       sampleTime: Double): Unit = {
     val realConstraint = latencyConstraint * BATCH_LATENCY
 
     val subPlanBatchNum = new Array[Array[Int]](subPlans.size)
     for (i <- 0 until subPlans.length) {
       subPlanBatchNum(i) = Array.fill(subPlans(i).mpCount)(MAX_BATCHNUM)
-      if (OPT_METHOD == OPT_SAMPLE) subPlans(i).putBatchNum(subPlanBatchNum(i))
     }
     var minResource = computeResourceForMPsSimple(subPlans, true, cardinalityOnly)
 
-    var timeA = 0L
-    var timeB = 0L
+    var time = 0L
     var validCount = 0
 
     if (OPT_METHOD == OPT_SAMPLE) {
-      var count = 0
+      val sample_threshold = (sampleTime * NANOPERSECOND.toDouble).toLong
+      while (time < sample_threshold) {
 
-      while (count < SAMPLE_THRESHOLD) {
-
-        var start = System.nanoTime()
+        val start = System.nanoTime()
         subPlans.foreach(_.nextMPBatchNum())
         val isValidBatchNums =
           !subPlans.filter(_.hasNewData())
             .map(findParentBatchNum(_))
             .exists(!_.validBatchNums())
-        timeA += System.nanoTime() - start
 
-        start = System.nanoTime()
         if (isValidBatchNums) {
           validCount += 1
-          val newLatency = computeLatencyForMPsSimple(subPlans, true, cardinalityOnly)
+          val newLatency = computeLatencyForMPs(subPlans, true, cardinalityOnly)
+          val newResource = computeResourceForMPs(subPlans, true, cardinalityOnly)
           if (newLatency < realConstraint) {
-            val newResource = computeResourceForMPsSimple(subPlans, true, cardinalityOnly)
             if (newResource < minResource) {
               minResource = newResource
               for (i <- 0 until subPlans.length) {
@@ -643,12 +643,9 @@ class SlothDBCostModel extends Logging {
             }
           }
         }
-        timeB += System.nanoTime() - start
-
-        count += 1
+        time += System.nanoTime() - start
       }
-
-      printf(s"${timeA/1000}, ${timeB/1000}, ${validCount}\n")
+      printf(s"${time/1000}, ${validCount}\n")
 
     } else {
       val totalMPCount = math.pow(MAX_BATCHNUM, subPlans.map(_.mpCount).sum).toLong
@@ -672,6 +669,7 @@ class SlothDBCostModel extends Logging {
           if (newLatency < realConstraint) {
             val newResource = computeResourceForMPsSimple(subPlans, true, cardinalityOnly)
             if (newResource < minResource) {
+              minResource = newResource
               for (i <- 0 until subPlans.length) {
                 subPlans(i).getBatchNum(subPlanBatchNum(i))
               }
@@ -687,13 +685,26 @@ class SlothDBCostModel extends Logging {
       }
       printf(s"${validCount}\n")
     }
+
+    subPlans.zipWithIndex.foreach(pair => {
+      val subPlan = pair._1
+      val idx = pair._2
+      subPlan.putBatchNum(subPlanBatchNum(idx))
+    })
+
   }
 
   def genMPPlanForLatencyConstraintOverhead(latencyConstraint: Double, threshold: Double)
   : Unit = {
-    val realConstraint = latencyConstraint * BATCH_LATENCY
+    for (i <- 0 until subPlans.length) {
+      for (j <- 0 until subPlans(i).mpCount) {
+        subPlans(i).mpBatchNums(j) = MIN_BATCHNUM
+      }
+    }
 
+    val realConstraint = latencyConstraint * BATCH_LATENCY
     var curLatency = computeLatencyForMPsSimple(subPlans, true, cardinalityOnly)
+
     var preIndex: Int = -1
 
     var timeA = 0L
@@ -741,11 +752,6 @@ class SlothDBCostModel extends Logging {
     }
 
     printf(s"${timeA/1000}, ${timeB/1000}, ${validCount}\n")
-
-    subPlans.foreach(subPlan => {
-      subPlan.mpBatchNums.zipWithIndex.foreach(batchNumWithIndex => {
-        printf(s"${batchNumWithIndex._2}: ${batchNumWithIndex._1}\n")
-      })})
   }
 
   private def findChildBatchNum(subPlan: SlothSubPlan): SlothSubPlan = {
@@ -1434,12 +1440,7 @@ class SlothSubPlan {
     // this.mpIsOuter = findAntiOuterCase()
 
     if (mpDecompose) {
-      if (!testOverhead) {
-        mpBatchNums = Array.fill(mpCount)(MAX_BATCHNUM)
-      } else {
-        mpBatchNums = Array.fill(mpCount)(1)
-      }
-
+      mpBatchNums = Array.fill(mpCount)(MAX_BATCHNUM)
       mpChildBatchNums = Array.fill(mpCount)(Int.MaxValue)
       mpDeltaSteps = Array.fill(mpCount)(BATCHNUM_STEP)
       mpBatchSteps = Array.fill(mpCount)(0)
@@ -1625,7 +1626,7 @@ object SlothDBCostModel {
   val MIN_BATCHNUM = 1
   var MAX_BATCHNUM = 100
   val BATCHNUM_STEP = 1
-  val BATCHNUM_FACTOR = 1
+  val BATCHNUM_FACTOR = 2
   val CHANGE_THRESHOLD = 0.01
 
   val MAX_INCREMENTABILITY = Double.MaxValue
@@ -1641,7 +1642,7 @@ object SlothDBCostModel {
   val OPT_BRUTEFORCE = 1
   val OPT_GREEDY = 2
   val OPT_METHOD = OPT_BRUTEFORCE
-  val SAMPLE_THRESHOLD = 100000
+  val NANOPERSECOND = 1000000000L
 
   def findNodeType(sparkPlan: SparkPlan): Int = {
     sparkPlan match {

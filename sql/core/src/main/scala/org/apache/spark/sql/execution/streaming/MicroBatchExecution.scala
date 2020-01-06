@@ -249,7 +249,11 @@ class MicroBatchExecution(
               sparkSession.conf.get(SQLConf.SLOTHDB_LATENCY_CONSTRAINT).get
             val inc_percentage =
               sparkSession.conf.get(SQLConf.SLOTHDB_INC_PERCENTAGE).getOrElse(1.0)
-            slothCostModel.genTriggerPlanForLatencyConstraint(latency_constraint, inc_percentage)
+            val sample_time =
+              sparkSession.conf.get(SQLConf.SLOTHDB_SAMPLE_TIME).getOrElse(1.0)
+            slothCostModel.genTriggerPlanForLatencyConstraint(latency_constraint,
+              inc_percentage,
+              sample_time)
           } else {
             val resource_constraint =
               sparkSession.conf.get(SQLConf.SLOTHDB_RESOURCE_CONSTRAINT).get

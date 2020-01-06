@@ -12,6 +12,9 @@ KAFAK_JAR=/home/totemtang/slothdb/spark/external/kafka-0-10-sql/target/scala-2.1
 REMOTE=southport.cs.uchicago.edu
 REMOTE_SPARK=$REMOTE:/tank/hdfs/totem/slothdb/spark
 
+#REMOTE=grace.cs.uchicago.edu
+#REMOTE_SPARK=$REMOTE:/mnt/hdd-2T-1/totem/spark/
+
 #scp $TPCH_JAR $SQL_JAR $EXAMPLE_JAR $REMOTE_SPARK/jars/
 scp $TPCH_JAR $SQL_JAR $REMOTE_SPARK/jars/
 #scp $TPCH_JAR $REMOTE_SPARK/jars/
