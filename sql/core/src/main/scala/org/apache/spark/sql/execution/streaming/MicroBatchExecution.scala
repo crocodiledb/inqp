@@ -262,10 +262,10 @@ class MicroBatchExecution(
             slothCostModel.genTriggerPlanForResourceConstraint(resource_constraint, inc_percentage)
           }
           val overhead = ((System.nanoTime() - start)/1000000).toDouble
-          if (execution_mode == SLOTHOVERHEAD) {
-            reportSlothOverhead(maxStep, overhead)
-            return
-          }
+          printf(s"Planning time $overhead ms\n")
+          reportSlothOverhead(maxStep, overhead)
+
+          if (execution_mode == SLOTHOVERHEAD) return
         }
       }
 

@@ -58,6 +58,8 @@ class SlothDBCostModel extends Logging {
 
   var costBias: Double = _
 
+  val parallelism = 50
+
   val overEstBias = Array(1.0, 2.0, 3.0, 4.0, 5.0)
   val underEstBias = Array(1.0, 0.5, 0.33, 0.25, 0.2)
 
@@ -507,7 +509,7 @@ class SlothDBCostModel extends Logging {
       val smallInc = random.nextFloat < threshold
 
       val pair = subPlans.filter(_.hasNewData())
-        .map(findParentBatchNum(_))
+        .map(_.findParentBatchNum(subPlans))
         .map(subPlan => {
 
           val incability =
@@ -556,7 +558,7 @@ class SlothDBCostModel extends Logging {
       val smallInc = (random.nextFloat() < threshold)
 
       val pair = subPlans.filter(_.hasNewData())
-        .map(findParentBatchNum(_))
+        .map(_.findParentBatchNum(subPlans))
         .map(subPlan => {
 
           val incability =
@@ -585,25 +587,63 @@ class SlothDBCostModel extends Logging {
     if (preIndex != -1) subPlans(preIndex).increaseMPBatchNum()
   }
 
-  private def findParentBatchNum(subPlan: SlothSubPlan): SlothSubPlan = {
-    if (subPlan.parentDep != -1) {
-      val parentSubPlan = subPlans(subPlan.parentDep)
-      var parentBatchNum = -1
-      parentSubPlan.mpBatchNums.zipWithIndex.foreach(pair => {
-        val batchNum = pair._1
-        val idx = pair._2
-        if (!parentSubPlan.mpIsSource(idx)) {
-          val blockingIdx = parentSubPlan.mpOPIndex(idx)
-          val blockingOp = parentSubPlan.blockingOperators(blockingIdx)
-          if (blockingOp.id == subPlan.root.id) {
-            parentBatchNum = batchNum
-          }
-        }
-      })
-      subPlan.mpParentBatchNum = parentBatchNum
+  class BruteforceThread(start: Long, end: Long, parallelism: Int,
+                         index: Int, inputMinResource: Double,
+                         realConstraint: Double) extends Thread {
+
+    var localMinResource: Double = inputMinResource
+
+    val localSubPlans: Array[SlothSubPlan] = new Array[SlothSubPlan](subPlans.length)
+    for (i <- 0 until localSubPlans.length) {
+      localSubPlans(i) = subPlans(i).copy()
     }
 
-    subPlan
+    val localSubPlanBatchNum = new Array[Array[Int]](localSubPlans.size)
+    for (i <- 0 until localSubPlans.length) {
+      localSubPlanBatchNum(i) = Array.fill(localSubPlans(i).mpCount)(MAX_BATCHNUM)
+    }
+
+    override def run(): Unit = {
+      var count = 0
+      var validCount = 0
+      var curIdx = index.toLong * end/parallelism
+      val endIdx = curIdx + end/parallelism
+      while (curIdx < endIdx) {
+        var tmpCurIdx = curIdx
+        localSubPlans.foreach(subPlan => {
+          for (i <- 0 until subPlan.mpCount) {
+            subPlan.mpBatchNums(i) = (tmpCurIdx % MAX_BATCHNUM + 1).toInt
+            tmpCurIdx = tmpCurIdx / MAX_BATCHNUM
+          }
+        })
+
+        val isValidBatchNums =
+           !localSubPlans.filter(_.hasNewData())
+            .map(_.findParentBatchNum(localSubPlans))
+            .exists(!_.validBatchNums())
+
+        if (isValidBatchNums) {
+          validCount += 1
+          val newLatency = computeLatencyForMPsSimple(localSubPlans, true, cardinalityOnly)
+          if (newLatency < realConstraint) {
+            val newResource = computeResourceForMPsSimple(localSubPlans, true, cardinalityOnly)
+            if (newResource < localMinResource) {
+              localMinResource = newResource
+              for (i <- 0 until localSubPlans.length) {
+                localSubPlans(i).getBatchNum(localSubPlanBatchNum(i))
+              }
+            }
+          }
+        }
+
+        curIdx += 1
+        count += 1
+
+        if ((count + 1) % 100000 == 0) printf(s"$index: ${count + 1}\n")
+      }
+
+      printf(s"Valid Count $index $validCount\n")
+    }
   }
 
   def genMPPlanUsingRandomOrBruteforce(latencyConstraint: Double,
@@ -627,7 +667,7 @@ class SlothDBCostModel extends Logging {
         subPlans.foreach(_.nextMPBatchNum())
         val isValidBatchNums =
           !subPlans.filter(_.hasNewData())
-            .map(findParentBatchNum(_))
+            .map(_.findParentBatchNum(subPlans))
             .exists(!_.validBatchNums())
 
         if (isValidBatchNums) {
@@ -649,41 +689,29 @@ class SlothDBCostModel extends Logging {
 
     } else {
       val totalMPCount = math.pow(MAX_BATCHNUM, subPlans.map(_.mpCount).sum).toLong
-      var curIdx = 0
-      while (curIdx < totalMPCount) {
-        var tmpCurIdx = curIdx
-        subPlans.foreach(subPlan => {
-          for (i <- 0 until subPlan.mpCount) {
-            subPlan.mpBatchNums(i) = tmpCurIdx % MAX_BATCHNUM + 1
-            tmpCurIdx = tmpCurIdx / MAX_BATCHNUM
-          }
-        })
+      val bfThreadArray = new Array[BruteforceThread](parallelism)
+      for (i <- 0 until parallelism) {
+        bfThreadArray(i) = new BruteforceThread(
+          0, totalMPCount,
+          parallelism, i,
+          minResource, realConstraint)
+      }
 
-        val isValidBatchNums =
-           !subPlans.filter(_.hasNewData())
-            .map(findParentBatchNum(_))
-            .exists(!_.validBatchNums())
+      bfThreadArray.foreach(_.start())
+      bfThreadArray.foreach(_.join())
 
-        if (isValidBatchNums) {
-          val newLatency = computeLatencyForMPsSimple(subPlans, true, cardinalityOnly)
-          if (newLatency < realConstraint) {
-            val newResource = computeResourceForMPsSimple(subPlans, true, cardinalityOnly)
-            if (newResource < minResource) {
-              minResource = newResource
-              for (i <- 0 until subPlans.length) {
-                subPlans(i).getBatchNum(subPlanBatchNum(i))
-              }
+      bfThreadArray.foreach(thread => {
+        if (thread.localMinResource < minResource) {
+          minResource = thread.localMinResource
+          for (i <- 0 until subPlanBatchNum.length) {
+            val oneSubPlanBatchNum = subPlanBatchNum(i)
+            for (j <- 0 until oneSubPlanBatchNum.length) {
+              subPlanBatchNum(i)(j) = thread.localSubPlanBatchNum(i)(j)
             }
           }
-
-          validCount += 1
         }
+      })
 
-        curIdx += 1
-
-        if ((curIdx + 1) % 100000 == 0) printf(s"${curIdx + 1}\n")
-      }
-      printf(s"${validCount}\n")
     }
 
     subPlans.zipWithIndex.foreach(pair => {
@@ -716,7 +744,7 @@ class SlothDBCostModel extends Logging {
     while (curLatency > realConstraint && !terminate) {
 
       val pair = subPlans.filter(_.hasNewData())
-        .map(findChildBatchNum(_))
+        .map(_.findChildBatchNum(subPlans))
         .map(subPlan => {
 
           val start = System.nanoTime()
@@ -727,7 +755,9 @@ class SlothDBCostModel extends Logging {
           (incability, subPlan.index)
         }).reduceLeft(
         (pairA, pairB) => {
-          if (pairA._1 < pairB._1) pairB
+          val incA = pairA._1
+          val incB = pairB._1
+          if (incA < incB) pairB
           else pairA
         })
 
@@ -752,22 +782,6 @@ class SlothDBCostModel extends Logging {
     }
 
     printf(s"${timeA/1000}, ${timeB/1000}, ${validCount}\n")
-  }
-
-  private def findChildBatchNum(subPlan: SlothSubPlan): SlothSubPlan = {
-    subPlan.getChildDep().foreach(childIndex => {
-      val childSubPlan = subPlans(childIndex)
-      for (i <- 0 until subPlan.mpCount) {
-        if (!subPlan.mpIsSource(i)) {
-          val opIdx = subPlan.mpOPIndex(i)
-          if (subPlan.blockingOperators(opIdx).id == childSubPlan.root.id) {
-            subPlan.mpChildBatchNums(i) = childSubPlan.mpBatchNums.max
-          }
-        }
-      }
-    })
-
-    subPlan
   }
 
   def constructNewData(): Map[BaseStreamingSource, String] = {
@@ -1360,6 +1374,43 @@ class SlothSubPlan {
     }
   }
 
+  def findChildBatchNum(subPlanArray: Array[SlothSubPlan]): SlothSubPlan = {
+    this.getChildDep().foreach(childIndex => {
+      val childSubPlan = subPlanArray(childIndex)
+      for (i <- 0 until this.mpCount) {
+        if (!this.mpIsSource(i)) {
+          val opIdx = this.mpOPIndex(i)
+          if (this.blockingOperators(opIdx).id == childSubPlan.root.id) {
+            this.mpChildBatchNums(i) = childSubPlan.mpBatchNums.max
+          }
+        }
+      }
+    })
+
+   this
+  }
+
+  def findParentBatchNum(subPlanArray: Array[SlothSubPlan]): SlothSubPlan = {
+    if (this.parentDep != -1) {
+      val parentSubPlan = subPlanArray(this.parentDep)
+      var parentBatchNum = -1
+      parentSubPlan.mpBatchNums.zipWithIndex.foreach(pair => {
+        val batchNum = pair._1
+        val idx = pair._2
+        if (!parentSubPlan.mpIsSource(idx)) {
+          val blockingIdx = parentSubPlan.mpOPIndex(idx)
+          val blockingOp = parentSubPlan.blockingOperators(blockingIdx)
+          if (blockingOp.id == this.root.id) {
+            parentBatchNum = batchNum
+          }
+        }
+      })
+      this.mpParentBatchNum = parentBatchNum
+    }
+
+    this
+  }
+
   def validBatchNums(): Boolean = {
     for (i <- 0 until mpCount) {
       if (mpBatchNums(i) < mpParentBatchNum) return false
@@ -1480,6 +1531,41 @@ class SlothSubPlan {
   def copy(): SlothSubPlan = {
     val newSubPlan = new SlothSubPlan
     newSubPlan.root = root.copy()
+    newSubPlan.index = index
+    newSubPlan.parentDep = parentDep
+
+    newSubPlan.childDeps = childDeps.clone()
+
+    newSubPlan.mpNum = mpNum
+    newSubPlan.mpDecompose = mpDecompose
+    newSubPlan.mpCount = mpCount
+
+    /* We comment this for efficiency */
+    newSubPlan.sources = new Array[BaseStreamingSource](sources.length)
+    for (i <- 0 until sources.length) {
+      newSubPlan.sources(i) = sources(i)
+    }
+
+    newSubPlan.endOffsets = new Array[SlothOffset](endOffsets.length)
+    for (i <- 0 until endOffsets.length) {
+      newSubPlan.endOffsets(i) = endOffsets(i)
+    }
+
+    newSubPlan.blockingOperators = new Array[OperatorCostModel](blockingOperators.length)
+    for (i <- 0 until blockingOperators.length) {
+      newSubPlan.blockingOperators(i) = blockingOperators(i).copy()
+    }
+
+    newSubPlan.mpBatchNums = mpBatchNums.clone()
+    newSubPlan.mpBatchSteps = mpBatchSteps.clone()
+    newSubPlan.mpExecutable = mpExecutable.clone()
+    newSubPlan.mpIsSource = mpIsSource.clone()
+    newSubPlan.mpChildBatchNums = mpChildBatchNums.clone()
+    newSubPlan.mpOPIndex = mpOPIndex.clone()
+
+    newSubPlan.mpDeltaSteps = mpDeltaSteps.clone()
+    newSubPlan.mpParentBatchNum = mpParentBatchNum
+
     newSubPlan
   }
 
