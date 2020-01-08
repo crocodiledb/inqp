@@ -1727,7 +1727,7 @@ object SlothDBCostModel {
   val OPT_SAMPLE = 0
   val OPT_BRUTEFORCE = 1
   val OPT_GREEDY = 2
-  val OPT_METHOD = OPT_BRUTEFORCE
+  val OPT_METHOD = OPT_GREEDY
   val NANOPERSECOND = 1000000000L
 
   def findNodeType(sparkPlan: SparkPlan): Int = {
