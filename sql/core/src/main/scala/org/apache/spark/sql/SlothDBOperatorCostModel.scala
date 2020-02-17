@@ -347,49 +347,49 @@ abstract class OperatorCostModel {
                                 batchSteps: Array[Int],
                                 indexArray: Array[Int]): Int = {
 
-    // var count = 0
-
-    // batchSteps.zipWithIndex.foreach(pair => {
-    //   val step = pair._1
-    //   val index = pair._2
-    //   if (step != batchNums(index)) {
-    //     indexArray(count) = index
-    //     count += 1
-    //   }
-    // })
-
-    // count
-
-    val lowestPair = batchNums.zipWithIndex.reduceLeft((pairA, pairB) => {
-      val batchNumA = pairA._1.toDouble
-      val batchIdxA = pairA._2
-      val batchNumB = pairB._1.toDouble
-      val batchIdxB = pairB._2
-
-      val progressA = (batchSteps(batchIdxA) + 1).toDouble/batchNumA
-      val progressB = (batchSteps(batchIdxB) + 1).toDouble/batchNumB
-      if (progressA <= progressB) pairA
-      else pairB
-    })
-
-    val batchNum = lowestPair._1.toDouble
-    val batchIdx = lowestPair._2
-    val lowestProgress = (batchSteps(batchIdx) + 1).toDouble/batchNum
-
     var count = 0
 
-    batchNums.zipWithIndex.foreach(pair => {
-      val batchNum = pair._1.toDouble
-      val batchIdx = pair._2
-
-      val progress = (batchSteps(batchIdx) + 1).toDouble/batchNum
-      if (math.abs(progress - lowestProgress) < 0.00000001) {
-        indexArray(count) = batchIdx
+    batchSteps.zipWithIndex.foreach(pair => {
+      val step = pair._1
+      val index = pair._2
+      if (step != batchNums(index)) {
+        indexArray(count) = index
         count += 1
       }
     })
 
     count
+
+    // val lowestPair = batchNums.zipWithIndex.reduceLeft((pairA, pairB) => {
+    //   val batchNumA = pairA._1.toDouble
+    //   val batchIdxA = pairA._2
+    //   val batchNumB = pairB._1.toDouble
+    //   val batchIdxB = pairB._2
+
+    //   val progressA = (batchSteps(batchIdxA) + 1).toDouble/batchNumA
+    //   val progressB = (batchSteps(batchIdxB) + 1).toDouble/batchNumB
+    //   if (progressA <= progressB) pairA
+    //   else pairB
+    // })
+
+    // val batchNum = lowestPair._1.toDouble
+    // val batchIdx = lowestPair._2
+    // val lowestProgress = (batchSteps(batchIdx) + 1).toDouble/batchNum
+
+    // var count = 0
+
+    // batchNums.zipWithIndex.foreach(pair => {
+    //   val batchNum = pair._1.toDouble
+    //   val batchIdx = pair._2
+
+    //   val progress = (batchSteps(batchIdx) + 1).toDouble/batchNum
+    //   if (math.abs(progress - lowestProgress) < 0.00000001) {
+    //     indexArray(count) = batchIdx
+    //     count += 1
+    //   }
+    // })
+
+    // count
   }
 
   def getFastLRByBatchNums(batchNums: Array[Int],
