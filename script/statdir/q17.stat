@@ -1,0 +1,30 @@
+join,Inner,5887,0.0,0.0,0.008363159,0.012383449,0.0,0.0
+agg,99
+filter,0.004913648,0.0,0.0
+scan,600572
+filter,0.004913648,0.0,0.0
+scan,600572
+
+SlothSymmetricHashJoin [numOfRows: 5,887] [updateRows: 2,936]
+	SlothHashAggregate [numOfRows: 297] [updateRows: 198]
+		SlothFilter [numOfRows: 2,951]
+			DataSourceV2Scan [numOfRows: 600,572]
+	SlothFilter [numOfRows: 2,951]
+		DataSourceV2Scan [numOfRows: 600,572]
+
+
+join,Inner,8853,0.01010101,0.0,0.0,0.014528712,0.0,0.011661328
+filter,0.004913648,0.0,0.0
+scan,600572
+agg,99
+filter,0.004913648,0.0,0.0
+scan,600572
+
+
+SlothSymmetricHashJoin [numOfRows: 8,853] [updateRows: 5,902]
+	SlothFilter [numOfRows: 2,951]
+		DataSourceV2Scan [numOfRows: 600,572]
+	SlothHashAggregate [numOfRows: 297] [updateRows: 198]
+		SlothFilter [numOfRows: 2,951]
+			DataSourceV2Scan [numOfRows: 600,572]
+
